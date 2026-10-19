@@ -1099,3 +1099,8 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [CHANGELOG.md](./CHANGELOG.md).
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-899 -->
+- #899: Issue #8: Withdraw - Recipient Address Validation
