@@ -139,6 +139,70 @@ Deployment artifacts are written to `deployments/<network>/<timestamp>/`, includ
 
 ---
 
+## MEV Protection
+
+SAFE-HAVEN includes built-in **MEV (Maximal Extractable Value) protection** to prevent sandwich attacks and front-running. The system uses a **commit-reveal scheme** combined with **time-weighted average pricing (TWAP)** to detect and mitigate MEV extraction.
+
+### Key Features
+
+- **Commit-Reveal Scheme** — Depositors privately commit transaction details (via hash), then reveal after the commit is immutable. Prevents attackers from predicting and front-running orders.
+- **Price Monitoring** — Continuous tracking of token prices; stores up to 24 hours of hourly price samples.
+- **Sandwich Attack Detection** — Compares current price against TWAP. Deviations exceeding 200 basis points (2%) trigger attack detection.
+- **MEV Recovery & Redistribution** — Recovered value is credited to affected users' MEV pools, which they can claim individually.
+- **Transparent Event Logging** — All MEV detections, commits, and recoveries are emitted as on-chain events for audit and monitoring.
+
+### MEV Protection API
+
+| Function | Purpose |
+|---|---|
+| `mev_commit(depositor, deposit_id, commit_hash)` | Submit a private commit to enable MEV protection |
+| `mev_reveal(depositor, deposit_id, token, amount, price, nonce)` | Reveal the commit and trigger MEV detection |
+| `claim_mev_recovery(depositor)` | Claim recovered MEV from the pool |
+| `get_mev_status_query(depositor, deposit_id)` | Query MEV protection status (`Unprotected`, `Committed`, `Revealed`, `AttackDetected`) |
+| `get_mev_detections(depositor, deposit_id, offset, limit)` | Paginated view of detected attacks |
+| `get_mev_pool_total()` | Query total MEV pool (pending distribution) |
+| `finalize_mev_redistribution(admin)` | Admin function to finalize MEV redistribution |
+
+### Example: MEV Protection Workflow
+
+```
+1. Alice deposits 1000 USDC with 1% penalty, locked for 1000 seconds
+   → deposit_id = 0
+
+2. Alice submits MEV commit (private order details via hash):
+   commit_hash = Keccak256(usdc_addr || 1000 || 102 || nonce)
+   mev_commit(alice, 0, commit_hash)
+   → Status: Committed
+
+3. Within 30 minutes, Alice reveals her actual transaction:
+   mev_reveal(alice, 0, usdc_addr, 1000, 102, nonce)
+   → Contract verifies hash matches
+   → Status: Revealed
+   → Price sample recorded
+
+4. Contract detects sandwich attack via TWAP:
+   If current_price (102) deviates from TWAP (100) by > 200 bps
+   → MEV attack detected!
+   → 2 USDC recovered and added to MEV pool
+   → Event: mev_detected(alice, 0, 200, 2)
+
+5. Alice claims her recovery:
+   mev_recovered = claim_mev_recovery(alice)
+   → Returns: 2 USDC
+   → Tokens transferred to alice
+```
+
+### Configuration
+
+| Constant | Value | Description |
+|---|---|---|
+| `MEV_REVEAL_WINDOW_SECS` | 1,800 (30 min) | Time allowed to reveal after commit |
+| `MEV_PRICE_DEVIATION_THRESHOLD_BPS` | 200 (2%) | Deviation threshold to trigger detection |
+
+For more details, see **[MEV_PROTECTION.md](./MEV_PROTECTION.md)**.
+
+---
+
 ## Contract API
 
 ### Initialization
@@ -155,6 +219,11 @@ Locks tokens. Returns the deposit ID.
 
 #### `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps) -> u32`
 Payer funds a vault for a different beneficiary.
+
+#### Smart wallets and delegated deposits
+Smart wallets use their contract address as `depositor`; the vault relies on Soroban `require_auth()` and does not require an EOA. Multisig and account-abstraction wallets keep their own approval policy and authorize the vault and token calls.
+
+For time-bounded delegated funding, use `authorize_session_key`, `deposit_with_session_key`, and `revoke_session_key`. The session key is the payer, while the smart wallet remains the deposit owner. See [Smart Wallet Integration](docs/SMART_WALLETS.md) for the security model and integration checklist.
 
 #### `deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps) -> u32`
 Locks tokens until a specific Stellar ledger sequence number is reached, instead of a wall-clock timestamp.
@@ -614,12 +683,412 @@ make deny             # cargo deny (licenses)
 
 ---
 
+## Prediction Markets
+
+SAFE-HAVEN includes a decentralized prediction market system that allows users to create, bet on, and resolve outcome-based markets tied to deposit behavior. Markets provide price discovery, hedging opportunities, and incentive alignment while remaining resistant to manipulation.
+
+### Market Types
+
+Markets can predict various SAFE-HAVEN deposit outcomes:
+
+| Market Type | Description | Example |
+|---|---|---|
+| `aggregate_deposits` | Total value of active deposits | "Sum of all deposits > 1M tokens" |
+| `avg_lock_time` | Average deposit lock duration | "Average lock time > 90 days" |
+| `unique_depositors` | Number of distinct depositors | "Active depositors > 500" |
+| `deposit_distribution` | Distribution across lock periods | "50% locked > 180 days" |
+| `penalty_accrual` | Total penalties collected | "Penalties > 50K tokens" |
+
+### Market Architecture
+
+**Two-phase resolution**:
+1. **Betting Phase** — Users place bets until `close_time`
+2. **Resolution Phase** — Oracle submits outcome between `close_time` and `resolution_deadline`
+
+**Anti-manipulation mechanisms**:
+- **Authorized oracles** — Only designated oracle can resolve each market
+- **Resolution deadline** — Forces resolution within a fixed window
+- **Duplicate submission prevention** — Oracle can submit once per market
+- **Outcome validation** — Invalid outcomes rejected at submission time
+- **Market closure required** — Resolution only possible on closed markets
+
+### Market API
+
+#### Initialization
+
+##### `init_prediction_markets(admin, fee_recipient, default_fee_bps?)`
+
+Initialize the prediction market subsystem.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Admin address (can create markets, cancel) |
+| `fee_recipient` | `Address` | Receives fees from claimed winnings |
+| `default_fee_bps` | `Option<u32>` | Default fee in basis points (0-1000, default: 100 = 1%) |
+
+**Returns** `Ok(())` on success.
+
+---
+
+#### Market Creation
+
+##### `create_prediction_market(creator, market_type, description, oracle, close_time, resolution_deadline, outcome_names, fee_bps?)`
+
+Create a new prediction market.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `creator` | `Address` | Must sign the transaction |
+| `market_type` | `String` | Market category (e.g., "aggregate_deposits") |
+| `description` | `String` | Human-readable description |
+| `oracle` | `Address` | Oracle address that will resolve the market |
+| `close_time` | `u64` | Unix timestamp when betting closes |
+| `resolution_deadline` | `u64` | Deadline for oracle to submit resolution |
+| `outcome_names` | `Vec<String>` | Names of 2-4 possible outcomes |
+| `fee_bps` | `Option<u32>` | Basis points fee (0-1000, optional) |
+
+**Returns** `u32` — the new market_id.
+
+**Constraints**:
+- `close_time > now` and `close_time - now >= MIN_MARKET_DURATION_SECS` (1 hour)
+- `resolution_deadline > close_time` and `resolution_deadline - close_time >= min_resolution_time_secs`
+- `outcome_names.len()` must be 2-4
+- `fee_bps` must be ≤ MAX_FEE_BPS (1000)
+
+**Example**:
+```rust
+// Market: "Will aggregate deposits exceed 1M tokens in the next 30 days?"
+let market_id = contract.create_prediction_market(
+    creator: alice,
+    market_type: "aggregate_deposits",
+    description: "Total deposits > 1M USDC?",
+    oracle: oracle_address,
+    close_time: now + 30_days,
+    resolution_deadline: now + 30_days + 1_hour,
+    outcome_names: vec!["Yes (>1M)", "No (<=1M)"],
+    fee_bps: Some(100),  // 1% fee
+)?;
+```
+
+---
+
+#### Betting
+
+##### `place_prediction_bet(bettor, market_id, outcome_id, amount, token)`
+
+Place a bet on a market outcome.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `bettor` | `Address` | Must sign the transaction |
+| `market_id` | `u32` | Target market |
+| `outcome_id` | `u32` | Outcome to bet on (0-3) |
+| `amount` | `i128` | Wager amount (1 - 10^15 units) |
+| `token` | `Address` | Token contract address for payment |
+
+**Returns** `Ok(())` on success.
+
+**Constraints**:
+- Market must be `Open` and `now < close_time`
+- `outcome_id < outcome_count`
+- `amount` must be 1 - 10^15
+- Bettor cannot place two bets on the same outcome in the same market
+- Bettor must approve token transfer
+
+**Example**:
+```rust
+// Bet 100 USDC on "Yes (>1M)" outcome
+contract.place_prediction_bet(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,  // "Yes (>1M)"
+    amount: 100 * 10^6,  // 100 USDC
+    token: usdc_address,
+)?;
+```
+
+---
+
+#### Market Management
+
+##### `close_prediction_market(closer, market_id)`
+
+Close market to new bets. Only admin or oracle can call.
+
+**Returns** `Ok(())` on success.
+
+---
+
+##### `resolve_prediction_market(oracle, market_id, winning_outcome, resolution_data?)`
+
+Submit resolution for a closed market.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `oracle` | `Address` | Must be the market's designated oracle |
+| `market_id` | `u32` | Market to resolve |
+| `winning_outcome` | `u32` | Winning outcome ID (0-3) |
+| `resolution_data` | `Option<i128>` | Optional: aggregate value (e.g., total deposits) |
+
+**Returns** `Ok(())` on success.
+
+**Constraints**:
+- `now <= resolution_deadline`
+- Market must be `Closed`
+- `winning_outcome < outcome_count`
+- Oracle cannot submit twice
+
+**Example**:
+```rust
+// Resolve market: outcome 0 ("Yes") won, final aggregate = 1.2M
+contract.resolve_prediction_market(
+    oracle: oracle_address,
+    market_id: 1,
+    winning_outcome: 0,
+    resolution_data: Some(1_200_000 * 10^6),  // 1.2M USDC
+)?;
+```
+
+---
+
+#### Claiming Winnings
+
+##### `claim_prediction_winnings(bettor, market_id, outcome_id, token)`
+
+Claim winnings for a resolved market.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `bettor` | `Address` | Must sign the transaction |
+| `market_id` | `u32` | Resolved market |
+| `outcome_id` | `u32` | Outcome bettor wagered on |
+| `token` | `Address` | Token to receive payout in |
+
+**Returns** `i128` — payout amount (after fees).
+
+**Constraints**:
+- Market must be `Resolved`
+- `outcome_id` must be the market's `winning_outcome`
+- Bettor cannot claim twice
+
+**Winnings calculation**:
+```
+winnings = (bet_amount / total_winning_bets) × total_pool
+fee = winnings × (fee_bps / 10_000)
+payout = winnings - fee
+```
+
+**Example**:
+```rust
+// Alice bet 100 on outcome 0. Outcome 0 won.
+// Total winning bets: 500. Total pool: 2000.
+// Alice's winnings = (100 / 500) × 2000 = 400
+// With 1% fee: payout = 400 - 4 = 396
+let payout = contract.claim_prediction_winnings(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,
+    token: usdc_address,
+)?;
+// payout = 396 USDC (minus fees sent to fee_recipient)
+```
+
+---
+
+#### Market Operations
+
+##### `cancel_prediction_market(admin, market_id, token)`
+
+Cancel a market and refund all bets. Admin only.
+
+**Returns** `i128` — total refunded.
+
+---
+
+##### `set_prediction_market_paused(admin, paused)`
+
+Pause/unpause market creation.
+
+---
+
+### Read-Only Queries
+
+| Function | Returns | Description |
+|---|---|---|
+| `get_prediction_market(market_id)` | `Option<PredictionMarket>` | Market details and status |
+| `get_market_outcome(market_id, outcome_id)` | `Option<MarketOutcome>` | Total bets and bettor count on outcome |
+| `get_user_bet(market_id, outcome_id, bettor)` | `Option<Bet>` | User's bet details |
+
+---
+
+### Data Structures
+
+#### `PredictionMarket`
+
+```rust
+pub struct PredictionMarket {
+    pub market_id: u32,
+    pub market_type: String,
+    pub description: String,
+    pub oracle: Address,
+    pub close_time: u64,
+    pub resolution_deadline: u64,
+    pub status: MarketStatus,  // Open, Closed, Resolved, Cancelled
+    pub winning_outcome: Option<u32>,
+    pub total_pool: i128,
+    pub bettor_count: u32,
+    pub outcome_count: u32,
+    pub created_at: u64,
+    pub resolution_data: Option<i128>,
+    pub fee_bps: u32,
+}
+```
+
+#### `MarketOutcome`
+
+```rust
+pub struct MarketOutcome {
+    pub outcome_id: u32,
+    pub name: String,
+    pub total_bet_amount: i128,
+    pub bettor_count: u32,
+}
+```
+
+#### `Bet`
+
+```rust
+pub struct Bet {
+    pub bettor: Address,
+    pub market_id: u32,
+    pub outcome_id: u32,
+    pub amount: i128,
+    pub timestamp: u64,
+    pub claimed: bool,
+}
+```
+
+---
+
+### Security Properties
+
+| Property | Implementation |
+|---|---|
+| **Auth enforcement** | All state-mutating functions require caller authentication |
+| **Oracle integrity** | Only designated oracle can resolve each market |
+| **Manipulation resistance** | Resolution deadline, duplicate submission checks, outcome validation |
+| **Fair distribution** | Proportional payout: `(bet / winning_pool) × total_pool` |
+| **Fee accountability** | Fees tracked per claim, sent to designated fee_recipient |
+| **No re-entrancy** | Storage state updated before token transfers |
+| **Overflow safety** | All arithmetic uses saturating operations |
+
+---
+
+### Error Codes
+
+| Code | Name | Meaning |
+|---|---|---|
+| 1000 | `MarketNotFound` | Market ID does not exist |
+| 1001 | `MarketNotOpen` | Market status is not Open |
+| 1002 | `InvalidMarketStatus` | Invalid status for operation |
+| 1003 | `InvalidOutcomeCount` | Outcome count not in 2-4 range |
+| 1004 | `InvalidResolutionTime` | Resolution timing invalid |
+| 1005 | `ResolutionTimeInPast` | Deadline in the past |
+| 1006 | `InvalidFeeBps` | Fee basis points > 1000 |
+| 1007 | `BettingClosed` | Market closed to new bets |
+| 1008 | `InvalidBetAmount` | Bet amount out of range |
+| 1009 | `InvalidOutcomeId` | Outcome ID invalid for market |
+| 1010 | `BetNotFound` | User has no bet on outcome |
+| 1011 | `AlreadyBetOnOutcome` | User already bet on this outcome |
+| 1012 | `InsufficientFunds` | Not enough tokens for bet |
+| 1013 | `MarketNotClosedYet` | Market still accepting bets |
+| 1014 | `MarketAlreadyResolved` | Market already resolved |
+| 1015 | `InvalidWinningOutcome` | Outcome ID invalid for winning |
+| 1016 | `ResolutionDeadlineExceeded` | Past deadline for resolution |
+| 1017 | `UnauthorizedOracle` | Not the designated oracle |
+| 1018 | `OracleSubmissionExists` | Oracle already submitted |
+| 1019 | `NoWinningBets` | Bettor did not win |
+| 1020 | `BetsAlreadyClaimed` | Already claimed winnings |
+| 1021 | `InvalidClaimAmount` | Calculated payout invalid |
+| 1022 | `ClaimingBeforeResolution` | Market not yet resolved |
+| 1023 | `Unauthorized` | Caller not authorized |
+| 1024 | `InvalidAdmin` | Invalid admin address |
+| 1025 | `MarketPaused` | Market creation paused |
+
+---
+
+### Example: Full Market Lifecycle
+
+```rust
+// 1. INITIALIZE (contract deployment)
+contract.init_prediction_markets(
+    admin: admin_address,
+    fee_recipient: treasury_address,
+    default_fee_bps: Some(100),  // 1%
+)?;
+
+// 2. CREATE MARKET
+let market_id = contract.create_prediction_market(
+    creator: alice,
+    market_type: "aggregate_deposits",
+    description: "Will deposits exceed 1M USDC?",
+    oracle: oracle_address,
+    close_time: now + 30.days(),
+    resolution_deadline: now + 31.days(),
+    outcome_names: vec!["Yes (>1M)", "No (<=1M)"],
+    fee_bps: None,  // Use default 1%
+)?;
+
+// 3. PLACE BETS (until close_time)
+contract.place_prediction_bet(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,  // "Yes"
+    amount: 100 * 10^6,
+    token: usdc_address,
+)?;
+
+contract.place_prediction_bet(
+    bettor: bob,
+    market_id: 1,
+    outcome_id: 1,  // "No"
+    amount: 50 * 10^6,
+    token: usdc_address,
+)?;
+
+// 4. CLOSE MARKET (by oracle or admin)
+contract.close_prediction_market(closer: oracle_address, market_id: 1)?;
+
+// 5. RESOLVE MARKET (by oracle before deadline)
+contract.resolve_prediction_market(
+    oracle: oracle_address,
+    market_id: 1,
+    winning_outcome: 0,  // "Yes" won
+    resolution_data: Some(1_200_000 * 10^6),
+)?;
+
+// 6. CLAIM WINNINGS (by winners)
+let payout = contract.claim_prediction_winnings(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,
+    token: usdc_address,
+)?;
+// Alice receives: (100 / 100) × 150 × 0.99 = 148.5 USDC
+// Treasury receives: 1.5 USDC (1% fee)
+```
+
+---
+
 ## Use Cases
 
 - **Savings** - Lock funds for a fixed period to enforce discipline
 - **Token vesting** - Team/investor tokens released on a schedule
 - **HODL commitments** - Commit to not selling until a future date
 - **Escrow** - Time-gated release of payment
+- **Price discovery** — Prediction markets reveal community expectations about deposit behavior
+- **Hedging** — Users offset risk by betting against favorable outcomes
+- **Engagement** — Markets incentivize participation and align stakeholder interests
 
 ---
 

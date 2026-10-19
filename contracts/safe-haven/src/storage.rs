@@ -1,6 +1,8 @@
-use soroban_sdk::{token, Address, Env, Vec};
+use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
 use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, SessionKeyEntry, MAX_LOCK_DURATION_SECS};
+use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
+use crate::types::CircuitBreakerActivation;
 
 // ================================================================
 // LEDGER_SECONDS: Average time between Stellar ledger closes
@@ -53,6 +55,69 @@ pub fn next_deposit_id(env: &Env, depositor: &Address) -> u32 {
     id
 }
 
+pub fn peek_next_deposit_id(env: &Env, depositor: &Address) -> u32 {
+    let key = VaultKey::DepositCounter(depositor.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_quantum_safe_public_key(env: &Env, account: &Address, public_key: &Bytes) {
+    let key = VaultKey::QuantumSafePublicKey(account.clone());
+    env.storage().persistent().set(&key, public_key);
+}
+
+pub fn get_quantum_safe_public_key(env: &Env, account: &Address) -> Option<Bytes> {
+    let key = VaultKey::QuantumSafePublicKey(account.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_quantum_safe_metadata(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    metadata: &Bytes,
+) {
+    let key = VaultKey::QuantumSafeMetadata(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, metadata);
+}
+
+pub fn get_quantum_safe_metadata(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<Bytes> {
+    let key = VaultKey::QuantumSafeMetadata(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_identity(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    identity: &IdentityLink,
+) {
+    let key = VaultKey::Identity(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, identity);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_identity(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<IdentityLink> {
+    let key = VaultKey::Identity(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn remove_identity(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::Identity(depositor.clone(), deposit_id);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+}
+
 // ----------------------------------------------------------------
 //  Active deposit ID list helpers
 // ----------------------------------------------------------------
@@ -101,6 +166,26 @@ pub fn get_deposit_ids(env: &Env, depositor: &Address) -> Vec<u32> {
     get_active_ids(env, depositor)
 }
 
+pub fn set_session_key(env: &Env, wallet: &Address, session_key: &Address, expires_at: u64) {
+    let key = VaultKey::SessionKey(wallet.clone(), session_key.clone());
+    env.storage().persistent().set(&key, &expires_at);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_session_key_expiry(env: &Env, wallet: &Address, session_key: &Address) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::SessionKey(wallet.clone(), session_key.clone()))
+}
+
+pub fn remove_session_key(env: &Env, wallet: &Address, session_key: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&VaultKey::SessionKey(wallet.clone(), session_key.clone()));
+}
+
 pub fn get_voting_power(env: &Env, voter: &Address) -> i128 {
     let mut total = 0i128;
     for deposit_id in get_active_ids(env, voter).iter() {
@@ -145,7 +230,48 @@ pub fn get_deposit_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> 
 pub fn remove_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::Deposit(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
+    remove_identity(env, depositor, deposit_id);
     remove_active_deposit_id(env, depositor, deposit_id);
+}
+
+pub fn add_tax_loss_harvest(env: &Env, depositor: &Address, harvest: &TaxLossHarvest) {
+    let key = VaultKey::TaxLossHarvests(depositor.clone());
+    let mut records: Vec<TaxLossHarvest> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    records.push_back(harvest.clone());
+    env.storage().persistent().set(&key, &records);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_tax_loss_harvests(env: &Env, depositor: &Address) -> Vec<TaxLossHarvest> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::TaxLossHarvests(depositor.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_tax_wash_sale_until(
+    env: &Env,
+    depositor: &Address,
+    token: &Address,
+    until: u64,
+) {
+    let key = VaultKey::TaxWashSaleUntil(depositor.clone(), token.clone());
+    env.storage().persistent().set(&key, &until);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_tax_wash_sale_until(
+    env: &Env,
+    depositor: &Address,
+    token: &Address,
+) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::TaxWashSaleUntil(depositor.clone(), token.clone()))
 }
 
 // ----------------------------------------------------------------
@@ -178,6 +304,7 @@ pub fn get_deposit_by_ledger_readonly(
 pub fn remove_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
+    remove_identity(env, depositor, deposit_id);
     remove_active_deposit_id(env, depositor, deposit_id);
 }
 
@@ -230,6 +357,7 @@ pub fn get_multi_deposit_readonly(
 pub fn remove_multi_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::MultiDeposit(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
+    remove_identity(env, depositor, deposit_id);
     remove_active_deposit_id(env, depositor, deposit_id);
 }
 
@@ -369,6 +497,66 @@ pub fn set_fee_recipient(env: &Env, recipient: &Address) {
 
 pub fn get_fee_recipient(env: &Env) -> Option<Address> {
     env.storage().persistent().get(&VaultKey::FeeRecipient)
+}
+
+/// Guard flag to prevent nested flash-loan re-entry in the same transaction.
+pub fn set_flash_loan_guard(env: &Env, active: bool) {
+    env.storage().persistent().set(&VaultKey::FlashLoanGuard, &active);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::FlashLoanGuard, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn is_flash_loan_guard_active(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, bool>(&VaultKey::FlashLoanGuard)
+        .unwrap_or(false)
+}
+
+pub fn set_flash_loan_state(
+    env: &Env,
+    borrower: &Address,
+    token: &Address,
+    state: &crate::types::FlashLoanState,
+) {
+    let key = VaultKey::FlashLoanState(borrower.clone(), token.clone());
+    env.storage().persistent().set(&key, state);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_flash_loan_state(
+    env: &Env,
+    borrower: &Address,
+    token: &Address,
+) -> Option<crate::types::FlashLoanState> {
+    let key = VaultKey::FlashLoanState(borrower.clone(), token.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn remove_flash_loan_state(env: &Env, borrower: &Address, token: &Address) {
+    let key = VaultKey::FlashLoanState(borrower.clone(), token.clone());
+    env.storage().persistent().remove(&key);
+}
+
+pub fn set_flash_loan_fee_balance(
+    env: &Env,
+    token: &Address,
+    depositor: &Address,
+    balance: i128,
+) {
+    let key = VaultKey::FlashLoanFeeBalance(token.clone(), depositor.clone());
+    env.storage().persistent().set(&key, &balance);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_flash_loan_fee_balance(env: &Env, token: &Address, depositor: &Address) -> i128 {
+    let key = VaultKey::FlashLoanFeeBalance(token.clone(), depositor.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
 }
 
 // ----------------------------------------------------------------
@@ -823,6 +1011,82 @@ pub fn get_stakers_list(env: &Env) -> Vec<Address> {
 }
 
 // ----------------------------------------------------------------
+//  Emergency Lockdown helpers
+// ----------------------------------------------------------------
+
+/// Set the emergency lockdown flag to `true` to activate lockdown.
+pub fn set_emergency_lockdown(env: &Env, is_locked: bool) {
+    let key = VaultKey::EmergencyLockdown;
+    env.storage().persistent().set(&key, &is_locked);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the current emergency lockdown status. Returns `false` if not set.
+pub fn is_emergency_lockdown(env: &Env) -> bool {
+    let key = VaultKey::EmergencyLockdown;
+    env.storage()
+        .persistent()
+        .get::<VaultKey, bool>(&key)
+        .unwrap_or(false)
+}
+
+/// Set the timestamp when lockdown was activated.
+pub fn set_lockdown_activated_at(env: &Env, timestamp: u64) {
+    let key = VaultKey::LockdownActivatedAt;
+    env.storage().persistent().set(&key, &timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the timestamp when lockdown was activated.
+pub fn get_lockdown_activated_at(env: &Env) -> Option<u64> {
+    let key = VaultKey::LockdownActivatedAt;
+    env.storage().persistent().get(&key)
+}
+
+/// Set the reason for lockdown.
+pub fn set_lockdown_reason(env: &Env, reason: &soroban_sdk::String) {
+    let key = VaultKey::LockdownReason;
+    env.storage().persistent().set(&key, reason);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the reason for lockdown.
+pub fn get_lockdown_reason(env: &Env) -> Option<soroban_sdk::String> {
+    let key = VaultKey::LockdownReason;
+    env.storage().persistent().get(&key)
+}
+
+/// Add a lockdown entry to the history list.
+pub fn add_lockdown_history(env: &Env, entry: &crate::types::LockdownEntry) {
+    let key = VaultKey::LockdownHistory;
+    let mut history: Vec<crate::types::LockdownEntry> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    history.push_back(entry.clone());
+    env.storage().persistent().set(&key, &history);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the lockdown history.
+pub fn get_lockdown_history(env: &Env) -> Vec<crate::types::LockdownEntry> {
+    let key = VaultKey::LockdownHistory;
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+// ----------------------------------------------------------------
 //  Archived deposit helpers
 // ----------------------------------------------------------------
 
@@ -935,6 +1199,86 @@ pub fn get_emergency_withdrawal_per_ledger(env: &Env, ledger: u32) -> i128 {
 /// Get the cumulative emergency withdrawal amount for the current ledger.
 pub fn get_current_ledger_emergency_withdrawal(env: &Env) -> i128 {
     get_emergency_withdrawal_per_ledger(env, env.ledger().sequence())
+}
+
+pub fn record_circuit_breaker_activation(env: &Env, activation: &CircuitBreakerActivation) {
+    let key = VaultKey::CircuitBreakerHistory;
+    let mut history: Vec<CircuitBreakerActivation> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    history.push_back(activation.clone());
+    env.storage().persistent().set(&key, &history);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_circuit_breaker_history(env: &Env) -> Vec<CircuitBreakerActivation> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::CircuitBreakerHistory)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn next_subscription_id(env: &Env, depositor: &Address) -> u32 {
+    let key = VaultKey::SubscriptionCounter(depositor.clone());
+    let id: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    env.storage().persistent().set(&key, &id.saturating_add(1));
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    id
+}
+
+pub fn set_subscription(env: &Env, depositor: &Address, id: u32, subscription: &DepositSubscription) {
+    let key = VaultKey::Subscription(depositor.clone(), id);
+    env.storage().persistent().set(&key, subscription);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    let ids_key = VaultKey::SubscriptionIds(depositor.clone());
+    let mut ids: Vec<u32> = env.storage().persistent().get(&ids_key).unwrap_or_else(|| Vec::new(env));
+    let already_present = ids.iter().any(|existing| existing == id);
+    if !already_present {
+        ids.push_back(id);
+        env.storage().persistent().set(&ids_key, &ids);
+    }
+    env.storage().persistent().extend_ttl(&ids_key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_subscription(env: &Env, depositor: &Address, id: u32) -> Option<DepositSubscription> {
+    let key = VaultKey::Subscription(depositor.clone(), id);
+    let subscription = env.storage().persistent().get(&key);
+    if subscription.is_some() {
+        env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    }
+    subscription
+}
+
+pub fn get_subscription_readonly(env: &Env, depositor: &Address, id: u32) -> Option<DepositSubscription> {
+    env.storage().persistent().get(&VaultKey::Subscription(depositor.clone(), id))
+}
+
+pub fn get_subscription_ids(env: &Env, depositor: &Address) -> Vec<u32> {
+    env.storage().persistent().get(&VaultKey::SubscriptionIds(depositor.clone())).unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn record_subscription_execution(env: &Env, depositor: &Address, id: u32, execution: &SubscriptionExecution) {
+    let key = VaultKey::SubscriptionHistory(depositor.clone(), id);
+    let mut history: Vec<SubscriptionExecution> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env));
+    history.push_back(execution.clone());
+    env.storage().persistent().set(&key, &history);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_subscription_history(env: &Env, depositor: &Address, id: u32) -> Vec<SubscriptionExecution> {
+    env.storage().persistent().get(&VaultKey::SubscriptionHistory(depositor.clone(), id)).unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_subscription_stats(env: &Env, depositor: &Address, id: u32, stats: &SubscriptionStats) {
+    let key = VaultKey::SubscriptionStats(depositor.clone(), id);
+    env.storage().persistent().set(&key, stats);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_subscription_stats(env: &Env, depositor: &Address, id: u32) -> SubscriptionStats {
+    env.storage().persistent().get(&VaultKey::SubscriptionStats(depositor.clone(), id)).unwrap_or(SubscriptionStats { deposit_count: 0, total_amount: 0, last_execution_time: 0 })
 }
 
 // ----------------------------------------------------------------
@@ -1152,6 +1496,19 @@ pub fn get_session_key(env: &Env, delegator: &Address, key_id: u32) -> Option<Se
 pub fn set_session_key(env: &Env, delegator: &Address, key_id: u32, entry: &SessionKeyEntry) {
     let key = VaultKey::SessionKey(delegator.clone(), key_id);
     env.storage().persistent().set(&key, entry);
+// ================================================================
+//  NFT Evolution helpers
+// ================================================================
+
+/// Store an NFT evolution record for a deposit.
+pub fn set_nft_evolution(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    record: &crate::nft::NFTEvolutionRecord,
+) {
+    let key = crate::types::VaultKey::NFTEvolution(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, record);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
@@ -1201,4 +1558,35 @@ pub fn add_active_session_key_id(env: &Env, delegator: &Address, key_id: u32) {
     let mut ids = get_active_session_key_ids(env, delegator);
     ids.push_back(key_id);
     set_active_session_key_ids(env, delegator, &ids);
+}
+/// Retrieve an NFT evolution record (mutable path — extends TTL).
+pub fn get_nft_evolution(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<crate::nft::NFTEvolutionRecord> {
+    let key = crate::types::VaultKey::NFTEvolution(depositor.clone(), deposit_id);
+    let record: Option<crate::nft::NFTEvolutionRecord> = env.storage().persistent().get(&key);
+    if record.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    }
+    record
+}
+
+/// Retrieve an NFT evolution record (read-only — does not extend TTL).
+pub fn get_nft_evolution_readonly(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<crate::nft::NFTEvolutionRecord> {
+    let key = crate::types::VaultKey::NFTEvolution(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Remove an NFT evolution record from storage.
+pub fn remove_nft_evolution(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = crate::types::VaultKey::NFTEvolution(depositor.clone(), deposit_id);
+    env.storage().persistent().remove(&key);
 }
