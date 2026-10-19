@@ -14,7 +14,7 @@ use crate::{
     events, storage,
     types::{
         DepositType, MultiTokenVaultEntry, TokenDeposit, VaultEntry, LedgerVaultEntry, Page,
-        STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
+        SessionKeyEntry, STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
     },
 };
 
@@ -1277,6 +1277,244 @@ impl SafeHaven {
 
         events::rewards_claimed(&env, &staker, reward);
         Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    //  Session Keys: Delegated Funding Authority
+    // ----------------------------------------------------------------
+
+    /// Create a session key that allows a delegate to make deposits on behalf of a delegator.
+    ///
+    /// **Parameters**
+    /// - `delegator`: The address authorizing the session key (must sign)
+    /// - `delegate`: The address that can use this key to make deposits
+    /// - `max_amount`: Maximum total amount that can be deposited using this key (0 = unlimited)
+    /// - `expires_at`: Expiration timestamp (must be in the future)
+    ///
+    /// **Returns** the session key ID on success
+    ///
+    /// **Authorization** requires `delegator.require_auth()`
+    pub fn create_session_key(
+        env: Env,
+        delegator: Address,
+        delegate: Address,
+        max_amount: i128,
+        expires_at: u64,
+    ) -> Result<u32, VaultError> {
+        delegator.require_auth();
+
+        let now = env.ledger().timestamp();
+        
+        // Validate expiration
+        if expires_at <= now {
+            return Err(VaultError::UnlockTimeNotInFuture);
+        }
+
+        // Validate max_amount if specified
+        if max_amount < 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Create the session key entry
+        let key_entry = SessionKeyEntry {
+            delegator: delegator.clone(),
+            delegate: delegate.clone(),
+            max_amount,
+            expires_at,
+            is_revoked: false,
+            amount_used: 0,
+            created_at: now,
+        };
+
+        // Get the next key ID and store
+        let key_id = storage::get_and_increment_session_key_counter(&env, &delegator);
+        storage::set_session_key(&env, &delegator, key_id, &key_entry);
+
+        // Add to active keys list
+        storage::add_active_session_key_id(&env, &delegator, key_id);
+
+        events::session_key_created(
+            &env,
+            &delegator,
+            &delegate,
+            key_id,
+            max_amount,
+            expires_at,
+        );
+
+        Ok(key_id)
+    }
+
+    /// Revoke a session key, disabling it immediately.
+    ///
+    /// **Parameters**
+    /// - `delegator`: The address that created the session key (must sign)
+    /// - `key_id`: The ID of the session key to revoke
+    ///
+    /// **Returns** `Ok(())` on success
+    ///
+    /// **Authorization** requires `delegator.require_auth()`
+    ///
+    /// **Errors**
+    /// - `SessionKeyNotFound` if the key does not exist
+    /// - `SessionKeyRevoked` if the key is already revoked
+    pub fn revoke_session_key(
+        env: Env,
+        delegator: Address,
+        key_id: u32,
+    ) -> Result<(), VaultError> {
+        delegator.require_auth();
+
+        // Fetch the session key
+        let mut entry = storage::get_session_key(&env, &delegator, key_id)
+            .ok_or(VaultError::SessionKeyNotFound)?;
+
+        // Check if already revoked
+        if entry.is_revoked {
+            return Err(VaultError::SessionKeyRevoked);
+        }
+
+        // Mark as revoked
+        entry.is_revoked = true;
+
+        // Update in storage
+        storage::set_session_key(&env, &delegator, key_id, &entry);
+
+        events::session_key_revoked(&env, &delegator, key_id);
+
+        Ok(())
+    }
+
+    /// Make a deposit using a session key on behalf of the delegator.
+    ///
+    /// **Parameters**
+    /// - `delegate`: The address using the session key (must sign)
+    /// - `session_key_id`: The ID of the session key to use
+    /// - `delegator`: The original depositor (owner of the session key)
+    /// - `token`: Token address to deposit
+    /// - `amount`: Amount to deposit
+    /// - `unlock_time`: Unlock time for the deposit
+    /// - `penalty_bps`: Early exit penalty in basis points
+    ///
+    /// **Returns** the deposit ID on success
+    ///
+    /// **Authorization** requires the delegate (holder of the key) to sign
+    ///
+    /// **Errors**
+    /// - `SessionKeyNotFound` if the key does not exist
+    /// - `SessionKeyRevoked` if the key is revoked
+    /// - `SessionKeyExpired` if the key has expired
+    /// - `SessionKeyInsufficientLimit` if the deposit would exceed the max amount
+    pub fn deposit_with_session_key(
+        env: Env,
+        delegate: Address,
+        session_key_id: u32,
+        delegator: Address,
+        token: Address,
+        amount: i128,
+        unlock_time: u64,
+        penalty_bps: u32,
+    ) -> Result<u32, VaultError> {
+        // The delegate signs (holder of the session key)
+        delegate.require_auth();
+
+        let now = env.ledger().timestamp();
+
+        // Fetch the session key
+        let mut entry = storage::get_session_key(&env, &delegator, session_key_id)
+            .ok_or(VaultError::SessionKeyNotFound)?;
+
+        // Check if revoked
+        if entry.is_revoked {
+            return Err(VaultError::SessionKeyRevoked);
+        }
+
+        // Check if expired
+        if now >= entry.expires_at {
+            return Err(VaultError::SessionKeyExpired);
+        }
+
+        // Verify delegate matches
+        if entry.delegate != delegate {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Check max amount limit
+        if entry.max_amount > 0 {
+            let new_total = entry.amount_used.saturating_add(amount);
+            if new_total > entry.max_amount {
+                return Err(VaultError::SessionKeyInsufficientLimit);
+            }
+        }
+
+        // Validate basic deposit parameters (reuse core validation logic)
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if amount > MAX_DEPOSIT_AMOUNT {
+            return Err(VaultError::AmountTooLarge);
+        }
+        if unlock_time <= now {
+            return Err(VaultError::UnlockTimeNotInFuture);
+        }
+        if unlock_time - now > MAX_LOCK_DURATION_SECS {
+            return Err(VaultError::LockDurationTooLong);
+        }
+        if unlock_time - now < MIN_LOCK_DURATION_SECS {
+            return Err(VaultError::LockDurationTooShort);
+        }
+        if penalty_bps > 10000 {
+            return Err(VaultError::InvalidPenaltyBps);
+        }
+
+        // Check if contract is paused
+        if storage::is_paused(&env) {
+            return Err(VaultError::ContractPaused);
+        }
+
+        // Update amount_used in session key
+        entry.amount_used = entry.amount_used.saturating_add(amount);
+        storage::set_session_key(&env, &delegator, session_key_id, &entry);
+
+        // Create the actual deposit on behalf of delegator
+        let client = token::Client::new(&env, &token);
+        client.transfer_from(
+            &env.current_contract_address(),
+            &delegate,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        // Get next deposit ID for delegator
+        let deposit_id = storage::get_and_increment_deposit_counter(&env, &delegator);
+
+        // Create vault entry
+        let vault_entry = VaultEntry {
+            token: token.clone(),
+            amount,
+            unlock_time,
+            depositor: delegator.clone(),
+            penalty_bps,
+            compound_frequency_secs: 0,
+            last_accrual_timestamp: now,
+        };
+
+        storage::set_deposit(&env, &delegator, deposit_id, &vault_entry);
+        storage::add_active_deposit_id(&env, &delegator, deposit_id);
+        storage::add_depositor(&env, &delegator);
+
+        events::deposit(&env, &delegator, &token, amount, unlock_time, deposit_id);
+        events::deposit_with_session_key(
+            &env,
+            &delegator,
+            &delegate,
+            &token,
+            amount,
+            session_key_id,
+            deposit_id,
+        );
+
+        Ok(deposit_id)
     }
 
     // ----------------------------------------------------------------

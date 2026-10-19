@@ -29,4 +29,12 @@ pub enum VaultError {
     RecipientNotWhitelisted = 18,
     /// Compound frequency must be >= 60 seconds if non-zero (issue #332).
     InvalidCompoundFrequency = 19,
+    /// Session key not found
+    SessionKeyNotFound = 20,
+    /// Session key has been revoked
+    SessionKeyRevoked = 21,
+    /// Session key has expired
+    SessionKeyExpired = 22,
+    /// Session key exceeds maximum deposit amount
+    SessionKeyInsufficientLimit = 23,
 }
