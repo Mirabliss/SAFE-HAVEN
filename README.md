@@ -1107,3 +1107,6 @@ MIT
 
 <!-- handsoff-issue-901 -->
 - #901: Issue #10: Deposit Retrieval - get_vault Query Consistency
+
+<!-- handsoff-issue-902 -->
+- #902: Issue #11: Withdrawal Fee Calculation Accuracy
