@@ -5337,14 +5337,51 @@ fn test_sustainability_report_timestamp() {
 
     let now = env.ledger().timestamp();
     let unlock_time = now + 100;
-    
+
     vault.deposit(&alice, &token, &1_000, &unlock_time, &0)
         .expect("deposit");
 
     let report = vault.generate_sustainability_report(&alice);
-    
-    // Report timestamp should be approximately now
-    assert_eq!(report.report_timestamp, now);
+
+    // Timestamp must match the current ledger time at query time.
+    assert_eq!(report.report_timestamp, env.ledger().timestamp());
+}
+
+#[test]
+fn test_sustainability_report_timestamp_precision_and_cache_free() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0)
+        .expect("deposit");
+
+    let report_before = vault.generate_sustainability_report(&alice);
+    assert_eq!(report_before.report_timestamp, env.ledger().timestamp());
+
+    let next_ts = env.ledger().timestamp().saturating_add(1);
+    env.ledger().set_timestamp(next_ts);
+
+    let report_after = vault.generate_sustainability_report(&alice);
+    assert_eq!(report_after.report_timestamp, next_ts);
+    assert_ne!(report_before.report_timestamp, report_after.report_timestamp);
+}
+
+#[test]
+fn test_sustainability_report_timestamp_changes_across_queries() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0)
+        .expect("deposit");
+
+    let report1 = vault.generate_sustainability_report(&alice);
+    env.ledger().set_timestamp(env.ledger().timestamp().saturating_add(5));
+    let report2 = vault.generate_sustainability_report(&alice);
+
+    assert!(report2.report_timestamp > report1.report_timestamp);
+    assert_ne!(report1.report_timestamp, report2.report_timestamp);
 }
 
 #[test]

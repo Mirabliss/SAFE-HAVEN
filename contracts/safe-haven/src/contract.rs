@@ -2039,6 +2039,51 @@ impl SafeHaven {
         env.ledger().timestamp()
     }
 
+    pub fn get_sustainability_metrics(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+    ) -> Option<crate::types::SustainabilityMetrics> {
+        storage::get_sustainability_metrics(&env, &depositor, deposit_id)
+    }
+
+    pub fn generate_sustainability_report(
+        env: Env,
+        depositor: Address,
+    ) -> crate::types::SustainabilityReport {
+        let now = env.ledger().timestamp();
+        let ids = storage::get_deposit_ids(&env, &depositor);
+
+        let mut total_carbon_footprint: i128 = 0;
+        let mut total_carbon_offset: i128 = 0;
+        let mut renewable_total: u64 = 0;
+        let mut active_deposit_count: u32 = 0;
+
+        for id in ids.iter() {
+            if let Some(metrics) = storage::get_sustainability_metrics_readonly(&env, &depositor, id) {
+                total_carbon_footprint = total_carbon_footprint.saturating_add(metrics.carbon_footprint);
+                total_carbon_offset = total_carbon_offset.saturating_add(metrics.carbon_offset_grams);
+                renewable_total = renewable_total.saturating_add(metrics.renewable_energy_percent as u64);
+                active_deposit_count = active_deposit_count.saturating_add(1);
+            }
+        }
+
+        let average_renewable_energy_percent = if active_deposit_count > 0 {
+            ((renewable_total / active_deposit_count as u64) as u32).min(100)
+        } else {
+            0
+        };
+
+        crate::types::SustainabilityReport {
+            depositor: depositor.clone(),
+            total_carbon_footprint,
+            average_renewable_energy_percent,
+            total_carbon_offset,
+            active_deposit_count,
+            report_timestamp: now,
+        }
+    }
+
     /// Returns time remaining for a deposit.
     /// For timestamp-based deposits: exact seconds remaining.
     /// For ledger-based deposits: estimated seconds (remaining_ledgers × 5).
