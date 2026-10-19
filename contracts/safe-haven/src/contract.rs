@@ -14,7 +14,7 @@ use crate::{
     events, storage,
     types::{
         DepositType, MultiTokenVaultEntry, TokenDeposit, VaultEntry, LedgerVaultEntry, Page,
-        STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
+        STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, InsuranceClaim, ClaimStatus,
     },
 };
 
@@ -1723,6 +1723,16 @@ impl SafeHaven {
     /// withdrawals have occurred in that ledger.
     pub fn get_emergency_withdrawal_total(env: Env, ledger: u32) -> i128 {
         storage::get_emergency_withdrawal_per_ledger(&env, ledger)
+    }
+
+    /// Returns the current balance of the staker rewards pool.
+    /// 
+    /// The rewards pool accumulates 70% of penalties from early deposit cancellations.
+    /// Stakers can claim their proportional share based on their registered stake.
+    /// 
+    /// This is a read-only query that does not modify contract state.
+    pub fn get_rewards_pool_total(env: Env) -> i128 {
+        storage::get_rewards_pool(&env)
     }
 
     // ----------------------------------------------------------------
