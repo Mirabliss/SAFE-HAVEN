@@ -152,6 +152,49 @@ soroban contract invoke \
   --deposit_id 0
 ```
 
+## Staker Registry Functions
+
+### `register_staker(staker, amount)`
+
+Registers a positive `i128` numeric weight or replaces the caller's existing weight. `staker` must authorize the transaction. The amount is **not** a token deposit; no token address is accepted and no tokens move. Registration emits `StakerRegistered`.
+
+```bash
+soroban contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$STAKER_SECRET" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- register_staker \
+  --staker "$STAKER_ADDRESS" \
+  --amount 100000000
+```
+
+### `claim_staker_rewards(staker)`
+
+Requires staker authorization and a registered positive weight. The accounting amount is calculated as:
+
+```text
+floor(staker_weight × current_rewards_pool / current_total_staked)
+```
+
+The calculated amount must be positive. On success, the method returns `Ok(())`, reduces the current pool, updates cumulative claimed accounting, and emits `RewardsClaimed` with the calculated amount. **The current implementation does not transfer tokens as part of this claim.** There is no public contract getter for a staker's amount, total stake, or the reward pool; clients need a reliable event indexer or other trusted state source.
+
+```bash
+soroban contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$STAKER_SECRET" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- claim_staker_rewards \
+  --staker "$STAKER_ADDRESS"
+```
+
+Claims use the pool at the time each claim runs, rather than a fixed entitlement snapshot. Since each claim reduces the shared pool, timing/order and integer rounding can affect later calculations. Registration amounts are not token-denominated by the contract, and the pool is not separated by token.
+
+For a full user walkthrough, reward-pool penalty cases, Soroban SDK transaction building, and FAQ, see the [Staker Registry User Guide](./STAKER_REGISTRY_GUIDE.md).
+
 ## Admin operations
 
 ### emergency_withdraw(admin, depositor, deposit_id)

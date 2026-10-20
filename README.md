@@ -274,7 +274,7 @@ Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumu
 
 ### Staker Registry Functions
 
-The staker registry allows users to register as stakers and earn a portion of penalties accrued from early deposit exits. This creates an incentive mechanism where stakers share in the penalties paid by users who exit early.
+The staker registry records a numeric weight and maintains penalty/reward-pool accounting. **The current implementation does not transfer tokens on registration or on reward claims, and the pool is not separated by token.** Read the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for the step-by-step registration and claim walkthroughs, exact calculation rules, CLI and TypeScript examples, and FAQ.
 
 #### `register_staker(staker, amount) -> Result<(), VaultError>`
 Register or update a staker's stake amount.
@@ -284,7 +284,7 @@ Register or update a staker's stake amount.
 | Parameter | Type | Description |
 |---|---|---|
 | `staker` | `Address` | The staker's address. Must sign the transaction. |
-| `amount` | `i128` | Stake amount in contract tokens (> 0). |
+| `amount` | `i128` | Positive numeric weight used in reward calculations; no tokens are transferred. |
 
 **Returns** `Ok(())` on success, or an error code if validation fails.
 
@@ -318,11 +318,11 @@ Claim accumulated rewards from the staker rewards pool.
 
 **Behavior**
 - Validates that the staker is registered — returns `StakerNotFound` if not.
-- Calculates the staker's proportional share: `(stake_amount / total_staked) × rewards_pool`.
+- Calculates `floor(stake_amount × current_rewards_pool / total_staked)` using the pool at claim time.
 - Validates that the calculated reward is > 0 — returns `NoRewardsToClaim` if the pool is empty or the proportion rounds to zero.
 - Deducts the reward from the rewards pool.
 - Tracks cumulative rewards claimed per staker for auditing.
-- Emits a `RewardsClaimed` event.
+- Emits a `RewardsClaimed` event. The current implementation does not transfer tokens.
 - Requires authentication from the staker.
 
 **Example**
@@ -330,15 +330,17 @@ Claim accumulated rewards from the staker rewards pool.
 // Alice claims her proportional share of the rewards pool
 vault.claim_staker_rewards(&alice)?;
 
-// If Alice has stake 1000 and total_staked is 4000, and rewards_pool is 700:
-// Alice's reward = (1000 / 4000) × 700 = 175 tokens
+// If Alice has weight 1000, total_staked is 4000, and the pool is 700:
+// The claim accounting amount is floor(1000 × 700 / 4000) = 175.
 ```
+
+For limitations, claim-order effects, and the full penalty behavior, see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md).
 
 ---
 
 ### Penalty Splitting & Rewards Pool
 
-When a user calls `cancel_deposit()` to exit early, the penalty is split as follows:
+For timestamp-based and ledger-based single-token deposits, an early `cancel_deposit()` splits the penalty as follows:
 
 | Recipient | Percentage | Basis Points |
 |---|---|---|
@@ -351,6 +353,7 @@ If a user cancels a deposit with 100 tokens penalty (10% of 1000):
 - Staker Rewards Pool receives 70 tokens (100 × 0.70)
 
 Registered stakers can then claim their proportional share of the rewards pool based on their stake amount relative to total staked.
+Multi-token early cancellation currently sends the full penalty to the fee recipient. Claims update accounting and emit an event but do not transfer tokens; see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for details.
 
 ---
 
