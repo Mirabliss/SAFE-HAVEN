@@ -4,11 +4,53 @@
 
 #[cfg(test)]
 mod prediction_market_tests {
+    use soroban_sdk::{
+        testutils::Address as _,
+        token::StellarAssetClient,
+        Address, Env, String, Vec,
+    };
+
     use crate::{
         prediction_market,
         prediction_market_errors::PredictionMarketError,
         prediction_market_types::*,
     };
+
+    fn setup_market_with_bettor() -> (Env, Address, Address, Address, u32) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let fee_recipient = Address::generate(&env);
+        let bettor = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_id.address();
+
+        StellarAssetClient::new(&env, &token).mint(&bettor, &10_000);
+
+        prediction_market::initialize_markets(&env, admin.clone(), fee_recipient, 0).unwrap();
+
+        let market_id = prediction_market::create_market(
+            &env,
+            admin,
+            String::from_str(&env, "market"),
+            String::from_str(&env, "Will deposits rise?"),
+            Address::generate(&env),
+            env.ledger().timestamp() + 3600,
+            env.ledger().timestamp() + 7200,
+            Vec::from_array(
+                &env,
+                [
+                    String::from_str(&env, "Up"),
+                    String::from_str(&env, "Down"),
+                ],
+            ),
+            Some(0),
+        )
+        .unwrap();
+
+        (env, bettor, token, fee_recipient, market_id)
+    }
 
     // ================================================================
     //  Market Creation Tests (10 test cases)
@@ -90,9 +132,17 @@ mod prediction_market_tests {
 
     #[test]
     fn test_place_bet_valid() {
-        // Test valid bet placement on an open market
-        // Expected: Bet created, outcome updated, pool increased
-        assert_eq!(true, true);
+        let (env, bettor, token, _fee_recipient, market_id) = setup_market_with_bettor();
+
+        prediction_market::place_bet(&env, bettor.clone(), market_id, 0, 100, token.clone()).unwrap();
+
+        let bet = prediction_market::get_bet_details(&env, market_id, 0, &bettor).unwrap();
+        assert_eq!(bet.amount, 100);
+        assert_eq!(bet.outcome_id, 0);
+        assert_eq!(bet.market_id, market_id);
+
+        let outcome = prediction_market::get_outcome_details(&env, market_id, 0).unwrap();
+        assert_eq!(outcome.total_bet_amount, 100);
     }
 
     #[test]
@@ -139,9 +189,17 @@ mod prediction_market_tests {
 
     #[test]
     fn test_place_bet_duplicate_outcome() {
-        // Test placing second bet on same outcome by same user
-        // Expected: AlreadyBetOnOutcome error
-        assert_eq!(true, true);
+        let (env, bettor, token, _fee_recipient, market_id) = setup_market_with_bettor();
+
+        prediction_market::place_bet(&env, bettor.clone(), market_id, 0, 100, token.clone()).unwrap();
+
+        let err = prediction_market::place_bet(&env, bettor.clone(), market_id, 0, 200, token.clone())
+            .unwrap_err();
+        assert_eq!(err, PredictionMarketError::AlreadyBetOnOutcome);
+
+        prediction_market::place_bet(&env, bettor.clone(), market_id, 1, 50, token.clone()).unwrap();
+        let other = prediction_market::get_bet_details(&env, market_id, 1, &bettor).unwrap();
+        assert_eq!(other.amount, 50);
     }
 
     #[test]
