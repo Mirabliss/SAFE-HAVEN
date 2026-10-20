@@ -9,6 +9,7 @@
 //! | Category | Description | Key contract functions tested |
 //! |---|---|---|
 //! | **Initialization** | Contract deployment, admin setup, double-init guard | [`initialize`], [`is_initialized`] |
+//! | **Rewards pool** | Zero initialization and persistent penalty accumulation | [`initialize`], [`cancel_deposit`] |
 //! | **Deposit – happy path** | Successful deposits, token transfers, event emission | [`deposit`] |
 //! | **Deposit – validation** | Zero / negative / over-max amounts, past unlock, invalid lock duration, penalty bps | [`deposit`], `constants` |
 //! | **Multi-deposit** | Multiple deposits per address, independent unlock times, ID continuity after withdrawal | [`deposit`], [`get_deposit_ids`], [`withdraw`] |
@@ -221,6 +222,15 @@ impl UpgradeHarness {
 fn test_initialize_sets_admin() {
     let (_env, vault, _token, admin, _alice, _fee) = setup();
     assert_eq!(vault.get_admin(), Some(admin));
+}
+
+#[test]
+fn test_initialize_sets_rewards_pool_to_zero() {
+    let (env, _vault, _token, _admin, _alice, _fee) = setup();
+    let key = VaultKey::RewardsPool;
+
+    assert!(env.storage().persistent().has(&key));
+    assert_eq!(crate::storage::get_rewards_pool(&env), 0);
 }
 
 #[test]
@@ -1079,7 +1089,28 @@ fn test_cancel_deposit_partial_penalty_splits_correctly() {
     vault.cancel_deposit(&alice, &0);
     assert!(vault.get_vault(&alice, &0).is_none());
     assert_eq!(token_client.balance(&alice), 9_900);
-    assert_eq!(token_client.balance(&fee), 100);
+    assert_eq!(token_client.balance(&fee), 30);
+    assert_eq!(crate::storage::get_rewards_pool(&env), 70);
+}
+
+#[test]
+fn test_rewards_pool_accumulates_penalties_across_cancellations() {
+    let (env, vault, token, admin, alice, fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    let first_id = vault.deposit(&alice, &token, &1_000, &unlock_time, &1_000);
+    vault.cancel_deposit(&alice, &first_id);
+    assert_eq!(crate::storage::get_rewards_pool(&env), 70);
+
+    let second_id = vault.deposit(&alice, &token, &2_000, &unlock_time, &1_000);
+    vault.cancel_deposit(&alice, &second_id);
+    assert_eq!(crate::storage::get_rewards_pool(&env), 210);
+
+    assert_eq!(
+        vault.try_initialize(&admin, &fee, &None, &None),
+        Err(Ok(VaultError::AlreadyInitialized))
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 210);
 }
 
 #[test]
@@ -1091,7 +1122,8 @@ fn test_cancel_deposit_100_percent_penalty() {
     vault.cancel_deposit(&alice, &0);
     assert!(vault.get_vault(&alice, &0).is_none());
     assert_eq!(token_client.balance(&alice), 9_000);
-    assert_eq!(token_client.balance(&fee), 1_000);
+    assert_eq!(token_client.balance(&fee), 300);
+    assert_eq!(crate::storage::get_rewards_pool(&env), 700);
 }
 
 #[test]
@@ -2813,7 +2845,7 @@ fn test_cancel_deposit_ledger_based_zero_penalty() {
 }
 
 /// Test cancel_deposit on a ledger-based deposit with penalty.
-/// Penalty should be paid to fee_recipient; remainder to depositor.
+/// Penalty is split between fee_recipient and the staker rewards pool.
 #[test]
 fn test_cancel_deposit_ledger_based_with_penalty() {
     let (env, vault, token, _admin, alice, fee) = setup();
@@ -2830,7 +2862,8 @@ fn test_cancel_deposit_ledger_based_with_penalty() {
 
     // 25% penalty = 1_000; remainder = 3_000
     assert_eq!(token_client.balance(&alice), 9_000);
-    assert_eq!(token_client.balance(&fee), 1_000);
+    assert_eq!(token_client.balance(&fee), 300);
+    assert_eq!(crate::storage::get_rewards_pool(&env), 700);
     assert!(vault.get_vault(&alice, &id).is_none());
 }
 

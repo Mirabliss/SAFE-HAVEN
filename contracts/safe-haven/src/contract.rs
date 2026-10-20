@@ -385,6 +385,7 @@ impl SafeHaven {
         storage::set_admin(&env, &admin);
         storage::set_initialized(&env);
         storage::set_fee_recipient(&env, &fee_recipient);
+        storage::set_rewards_pool(&env, 0);
 
         if let Some(v) = max_deposit {
             if v <= 0 {
