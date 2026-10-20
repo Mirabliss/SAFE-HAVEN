@@ -65,7 +65,7 @@ extern crate std;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, BytesN, Env, String, Vec,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 use crate::{
@@ -4050,12 +4050,20 @@ fn test_multiple_stakers_proportional_rewards() {
 fn test_staker_registration_emits_event() {
     let (env, vault, _token, _admin, alice, _fee) = setup();
 
-    let staker_addr = alice.clone();
-    vault.register_staker(&staker_addr, &1000).unwrap();
+    let timestamp = env.ledger().timestamp();
+    vault.register_staker(&alice, &1000).unwrap();
 
-    // Check for staker_registered event
     let events = env.events().all();
-    assert!(events.len() > 0);
+    let (_, event) = events
+        .iter()
+        .find(|(_, event)| {
+            event.topics.len() == 2
+                && event.topics.get(0) == Symbol::new(&env, "StakerRegistered").into_val(&env)
+                && event.topics.get(1) == alice.clone().into_val(&env)
+        })
+        .expect("staker registration event should be emitted and filterable by address");
+
+    assert_eq!(event.data, (1000_i128, timestamp).into_val(&env));
 }
 
 #[test]

@@ -288,3 +288,10 @@ pub fn batch_withdraw(
         (successful_count, failed_count, total_amount),
     );
 }
+
+/// Emitted when a staker registers or updates their stake.
+pub fn staker_registered(env: &Env, staker: &Address, amount: i128) {
+    let topics = (Symbol::new(env, "StakerRegistered"), staker.clone());
+    env.events()
+        .publish(topics, (amount, env.ledger().timestamp()));
+}
