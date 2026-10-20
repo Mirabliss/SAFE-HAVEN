@@ -77,6 +77,8 @@ pub enum VaultKey {
     FlashLoanFeeBalance(Address, Address),
     /// Staker entry: maps staker address to their stake amount
     Staker(Address),
+    /// Registration timestamp for a staker.
+    StakerRegistrationTimestamp(Address),
     /// List of all registered stakers
     StakerList,
     /// Flag to track if a staker is in the StakerList (prevents duplicates)
@@ -187,6 +189,15 @@ pub struct Page {
 pub struct StakerEntry {
     pub staker: Address,
     pub stake_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakerInfo {
+    pub stake_amount: i128,
+    pub rewards_earned: i128,
+    pub rewards_claimed: i128,
+    pub registration_timestamp: u64,
 }
 
 /// Sponsorship fund configuration and state

@@ -916,6 +916,21 @@ pub fn get_staker(env: &Env, staker: &Address) -> Option<i128> {
     env.storage().persistent().get(&key)
 }
 
+/// Record the timestamp when a staker first registers.
+pub fn set_staker_registration_timestamp(env: &Env, staker: &Address, timestamp: u64) {
+    let key = VaultKey::StakerRegistrationTimestamp(staker.clone());
+    env.storage().persistent().set(&key, &timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the timestamp when a staker first registered, if recorded.
+pub fn get_staker_registration_timestamp(env: &Env, staker: &Address) -> Option<u64> {
+    let key = VaultKey::StakerRegistrationTimestamp(staker.clone());
+    env.storage().persistent().get(&key)
+}
+
 /// Get the legacy staker list written before the list was indexed.
 fn get_legacy_staker_list(env: &Env) -> Vec<Address> {
     let key = VaultKey::StakerList;

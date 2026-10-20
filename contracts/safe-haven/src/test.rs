@@ -3856,6 +3856,51 @@ fn test_register_staker_success() {
 }
 
 #[test]
+fn test_get_staker_info_returns_registered_staker_details_without_mutation() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    advance_time(&env, 1234);
+    let registered_at = env.ledger().timestamp();
+
+    vault.register_staker(&alice, &1000).unwrap();
+    crate::storage::set_rewards_pool(&env, 800);
+    crate::storage::set_staker_rewards_claimed(&env, &alice, 50);
+
+    let stake_before = crate::storage::get_staker(&env, &alice);
+    let total_staked_before = crate::storage::get_total_staked(&env);
+    let rewards_pool_before = crate::storage::get_rewards_pool(&env);
+    let rewards_claimed_before = crate::storage::get_staker_rewards_claimed(&env, &alice);
+    let stakers_before = crate::storage::get_stakers_list(&env);
+    let timestamp_before =
+        crate::storage::get_staker_registration_timestamp(&env, &alice);
+
+    let info = vault.get_staker_info(&alice).unwrap();
+    assert_eq!(info.stake_amount, 1000);
+    assert_eq!(info.rewards_earned, 850);
+    assert_eq!(info.rewards_claimed, 50);
+    assert_eq!(info.registration_timestamp, registered_at);
+
+    assert_eq!(crate::storage::get_staker(&env, &alice), stake_before);
+    assert_eq!(crate::storage::get_total_staked(&env), total_staked_before);
+    assert_eq!(crate::storage::get_rewards_pool(&env), rewards_pool_before);
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        rewards_claimed_before
+    );
+    assert_eq!(crate::storage::get_stakers_list(&env), stakers_before);
+    assert_eq!(
+        crate::storage::get_staker_registration_timestamp(&env, &alice),
+        timestamp_before
+    );
+}
+
+#[test]
+fn test_get_staker_info_returns_none_for_unregistered_address() {
+    let (_env, vault, _token, _admin, alice, _fee) = setup();
+
+    assert_eq!(vault.get_staker_info(&alice), None);
+}
+
+#[test]
 fn test_register_staker_zero_amount_fails() {
     let (env, vault, _token, _admin, alice, _fee) = setup();
 
