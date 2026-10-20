@@ -1,8 +1,11 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, Bytes};
 
 pub const MAX_DEPOSIT_AMOUNT: i128 = 1_000_000_000_000_000;
 pub const MAX_LOCK_DURATION_SECS: u64 = 157_788_000;
 pub const MIN_LOCK_DURATION_SECS: u64 = 60;
+
+// MEV Protection Constants
+pub const MEV_COMMIT_WINDOW_SECS: u64 = 1_800; // 30 minutes for reveal window
 
 /// Current storage schema version. Bump this constant when the on-chain
 /// layout of a `contracttype` struct changes so `migrate()` can detect
@@ -35,6 +38,9 @@ pub enum VaultKey {
     /// Persists the schema version written by the last `migrate()` call (or 1
     /// for contracts that were initialized before versioning was introduced).
     StorageVersion,
+    /// MEV Protection: Stores the commit hash for a (depositor, deposit_id) pair.
+    /// Keyed by (Address, u32) to enable commit-reveal scheme for MEV protection.
+    MevCommit(Address, u32),
 }
 
 #[contracttype]

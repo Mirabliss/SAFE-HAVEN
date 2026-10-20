@@ -108,3 +108,14 @@ pub fn withdraw_to(
     let topics = (Symbol::new(env, "withdraw_to"), depositor.clone(), token.clone());
     env.events().publish(topics, (recipient.clone(), amount));
 }
+
+
+pub fn mev_commit_submitted(env: &Env, depositor: &Address, deposit_id: u32) {
+    let topics = (Symbol::new(env, "mev_commit"), depositor.clone());
+    env.events().publish(topics, deposit_id);
+}
+
+pub fn mev_reveal_completed(env: &Env, depositor: &Address, deposit_id: u32) {
+    let topics = (Symbol::new(env, "mev_reveal"), depositor.clone());
+    env.events().publish(topics, deposit_id);
+}
