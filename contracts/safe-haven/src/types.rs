@@ -89,6 +89,10 @@ pub enum VaultKey {
     StakerRewardsClaimed(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
+    /// Number of stakers stored in the indexed list after the legacy list.
+    StakerCount,
+    /// Staker address at an index after the legacy list.
+    StakerListEntry(u32),
 }
 
 #[contracttype]

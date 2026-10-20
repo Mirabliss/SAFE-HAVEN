@@ -1673,6 +1673,12 @@ impl SafeHaven {
         Ok(())
     }
 
+    /// Return a page of registered stakers and the total number registered.
+    pub fn get_stakers(env: Env, offset: u32, limit: u32) -> Page {
+        let (items, total_count) = storage::get_stakers_page(&env, offset, limit);
+        Page { items, total_count }
+    }
+
     // ================================================================
     //  MEV PROTECTION: COMMIT-REVEAL SCHEME
     // ================================================================

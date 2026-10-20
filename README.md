@@ -305,6 +305,14 @@ vault.register_staker(&alice, &1000)?;
 vault.register_staker(&alice, &2000)?;
 ```
 
+#### `get_stakers(offset, limit) -> Page`
+Return a page of staker addresses in registration order. The result includes `total_count`, which is the number of registered stakers across all pages. Registration uses indexed persistent storage so adding stakers does not rewrite the full list.
+
+```rust
+let page = vault.get_stakers(&0, &25);
+// page.items contains the first 25 addresses; page.total_count reports all stakers.
+```
+
 #### `claim_staker_rewards(staker) -> Result<(), VaultError>`
 Claim accumulated rewards from the staker rewards pool.
 

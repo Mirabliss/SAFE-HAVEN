@@ -3884,6 +3884,7 @@ fn test_register_staker_updates_existing_stake() {
 
     // Update to 2000
     vault.register_staker(&alice, &2000).unwrap();
+    assert_eq!(vault.get_stakers(&0, &10).total_count, 1);
 
     // Verify event was emitted for second registration
     let events = env.events().all();
@@ -3926,6 +3927,60 @@ fn test_multiple_stakers_register() {
     vault.register_staker(&carol, &3000).unwrap();
 
     // All registrations should succeed
+}
+
+#[test]
+fn test_staker_pagination_with_more_than_one_hundred_stakers() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let vault_id = env.register(SafeHaven, ());
+    let vault = SafeHavenClient::new(&env, &vault_id);
+    let admin: Address = Address::generate(&env);
+    let fee_recipient: Address = Address::generate(&env);
+    vault.initialize(&admin, &fee_recipient, &None, &None);
+
+    let mut expected = soroban_sdk::Vec::new(&env);
+    for index in 0..105 {
+        let staker = Address::generate(&env);
+        vault
+            .register_staker(&staker, &(index as i128).saturating_add(1))
+            .unwrap();
+        expected.push_back(staker);
+    }
+
+    let first_page = vault.get_stakers(&0, &40);
+    assert_eq!(first_page.total_count, 105);
+    assert_eq!(first_page.items.len(), 40);
+    for index in 0..40 {
+        assert_eq!(first_page.items.get(index), expected.get(index));
+    }
+
+    let second_page = vault.get_stakers(&40, &40);
+    assert_eq!(second_page.total_count, 105);
+    assert_eq!(second_page.items.len(), 40);
+    for index in 0..40 {
+        assert_eq!(
+            second_page.items.get(index),
+            expected.get(index.saturating_add(40))
+        );
+    }
+
+    let last_page = vault.get_stakers(&100, &40);
+    assert_eq!(last_page.total_count, 105);
+    assert_eq!(last_page.items.len(), 5);
+    for index in 0..5 {
+        assert_eq!(
+            last_page.items.get(index),
+            expected.get(index.saturating_add(100))
+        );
+    }
+
+    let beyond_end = vault.get_stakers(&105, &40);
+    assert_eq!(beyond_end.total_count, 105);
+    assert!(beyond_end.items.is_empty());
+    assert_eq!(vault.get_stakers(&0, &0).total_count, 105);
+    assert!(vault.get_stakers(&0, &0).items.is_empty());
 }
 
 #[test]
