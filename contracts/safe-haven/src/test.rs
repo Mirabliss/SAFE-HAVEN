@@ -3928,6 +3928,21 @@ fn test_multiple_stakers_register() {
 }
 
 #[test]
+fn test_zero_stake_removal_does_not_leave_claimable_stake() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    vault.register_staker(&alice, &1).unwrap();
+
+    crate::storage::set_staker(&env, &alice, 0);
+    crate::storage::set_total_staked(&env, 0);
+    env.storage()
+        .persistent()
+        .remove(&VaultKey::Staker(alice.clone()));
+
+    let result = vault.claim_staker_rewards(&alice);
+    assert_eq!(result, Err(VaultError::StakerNotFound));
+}
+
+#[test]
 fn test_claim_staker_rewards_requires_registration() {
     let (env, vault, _token, _admin, alice, _fee) = setup();
 
@@ -4044,6 +4059,100 @@ fn test_multiple_stakers_proportional_rewards() {
     // Bob should be able to claim his proportional share (3000/4000 * 70 = 52.5, likely rounds to 52)
     let result = vault.claim_staker_rewards(&bob);
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_multiple_staker_claims_consume_shared_pool_without_overdraft() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let carol: Address = Address::generate(&env);
+
+    vault.register_staker(&alice, &1).unwrap();
+    vault.register_staker(&bob, &2).unwrap();
+    vault.register_staker(&carol, &3).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &101_i128);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+    vault.claim_staker_rewards(&bob).unwrap();
+    vault.claim_staker_rewards(&carol).unwrap();
+
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        16
+    );
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &bob),
+        28
+    );
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &carol),
+        28
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 29);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        20
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 25);
+}
+
+#[test]
+fn test_claim_fails_when_pool_cannot_yield_one_unit() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    vault.register_staker(&alice, &1).unwrap();
+    vault.register_staker(&bob, &1).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &1_i128);
+
+    let result = vault.claim_staker_rewards(&alice);
+    assert_eq!(result, Err(VaultError::NoRewardsToClaim));
+    assert_eq!(crate::storage::get_rewards_pool(&env), 1);
+}
+
+#[test]
+fn test_staker_claim_with_only_one_unit_in_rewards_pool() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    vault.register_staker(&alice, &1).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &1_i128);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        1
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 0);
+    assert_eq!(
+        vault.claim_staker_rewards(&alice),
+        Err(VaultError::NoRewardsToClaim)
+    );
+}
+
+#[test]
+fn test_staker_claim_with_stake_near_i128_max() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let stake = i128::MAX - 1;
+    vault.register_staker(&alice, &stake).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &1_i128);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+
+    assert_eq!(crate::storage::get_total_staked(&env), stake);
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        1
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 0);
 }
 
 #[test]
