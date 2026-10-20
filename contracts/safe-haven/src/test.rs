@@ -94,6 +94,7 @@ fn setup() -> (
 
     let admin: Address = Address::generate(&env);
     let alice: Address = Address::generate(&env);
+    let bob: Address = Address::generate(&env);
     let fee_recipient: Address = Address::generate(&env);
 
     let token_id = env.register_stellar_asset_contract_v2(admin.clone());
@@ -4100,7 +4101,7 @@ fn test_penalty_split_percentages() {
 }
 
 #[test]
-fn test_register_staker_auth_required() {
+fn test_register_staker_rejects_missing_auth_without_state_changes() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -4113,12 +4114,21 @@ fn test_register_staker_auth_required() {
 
     vault.initialize(&admin, &fee_recipient, &None, &None);
 
-    // Register should require auth from the staker (alice)
-    vault.register_staker(&alice, &1000).unwrap();
+    let total_staked_before = crate::storage::get_total_staked(&env);
+    let stakers_before = crate::storage::get_stakers_list(&env);
+
+    // No authorization is provided; auth must fail before amount validation.
+    env.mock_auths(&[]);
+    let result = vault.try_register_staker(&alice, &0);
+    assert!(matches!(result, Err(Err(_))));
+
+    assert_eq!(crate::storage::get_staker(&env, &alice), None);
+    assert_eq!(crate::storage::get_total_staked(&env), total_staked_before);
+    assert_eq!(crate::storage::get_stakers_list(&env), stakers_before);
 }
 
 #[test]
-fn test_claim_staker_rewards_auth_required() {
+fn test_claim_staker_rewards_rejects_missing_auth_without_state_changes() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -4127,26 +4137,25 @@ fn test_claim_staker_rewards_auth_required() {
 
     let admin: Address = Address::generate(&env);
     let alice: Address = Address::generate(&env);
+    let bob: Address = Address::generate(&env);
     let fee_recipient: Address = Address::generate(&env);
-
-    let token_id = env.register_stellar_asset_contract_v2(admin.clone());
-    let token_address = token_id.address();
-
-    StellarAssetClient::new(&env, &token_address).mint(&alice, &10_000);
 
     vault.initialize(&admin, &fee_recipient, &None, &None);
 
     vault.register_staker(&alice, &1000).unwrap();
+    crate::storage::set_rewards_pool(&env, 100);
 
-    // Deposit and cancel to generate rewards
-    let unlock_time = env.ledger().timestamp() + 3600;
-    let deposit_id = vault
-        .deposit(&alice, &token_address, &1000, &unlock_time, &1000)
-        .unwrap();
-    vault.cancel_deposit(&alice, &deposit_id).unwrap();
+    let rewards_pool_before = crate::storage::get_rewards_pool(&env);
+    let claimed_before = crate::storage::get_staker_rewards_claimed(&env, &alice);
 
-    // Claim should require auth from the staker (alice)
-    vault.claim_staker_rewards(&alice).unwrap();
+    // No authorization is provided; auth must fail before claim validation.
+    env.mock_auths(&[]);
+    let result = vault.try_claim_staker_rewards(&bob);
+    assert!(matches!(result, Err(Err(_))));
+
+    assert_eq!(crate::storage::get_staker(&env, &bob), None);
+    assert_eq!(crate::storage::get_rewards_pool(&env), rewards_pool_before);
+    assert_eq!(crate::storage::get_staker_rewards_claimed(&env, &alice), claimed_before);
 }
 
 // ================================================================
