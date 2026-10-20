@@ -168,7 +168,7 @@ pub fn place_bet(
 
     // Check market is open
     if market.status != MarketStatus::Open {
-        return Err(PredictionMarketError::BettingClosed);
+        return Err(PredictionMarketError::MarketNotOpen);
     }
 
     // Check betting deadline
