@@ -89,6 +89,22 @@ pub enum VaultKey {
     StakerRewardsClaimed(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
+    /// Sustainability metrics for a deposit (depositor, deposit_id) -> SustainabilityMetrics
+    SustainabilityMetrics(Address, u32),
+    /// Total carbon footprint for a depositor
+    TotalCarbonFootprint(Address),
+    /// Total carbon offset for a depositor
+    TotalCarbonOffset(Address),
+    /// MEV commitment for a deposit (depositor, deposit_id) -> MEVCommitment
+    MEVCommitment(Address, u32),
+    /// MEV status for a deposit (depositor, deposit_id) -> MEVStatus
+    MEVStatus(Address, u32),
+    /// MEV detection list for a deposit (depositor, deposit_id) -> Vec<MEVDetection>
+    MEVDetections(Address, u32),
+    /// MEV recovery pool total
+    MEVRecoveryPool,
+    /// MEV recovery owed to a depositor
+    MEVRecoveryOwed(Address),
 }
 
 #[contracttype]
@@ -325,4 +341,114 @@ pub struct BatchWithdrawalResult {
     pub failed_count: u32,
     /// Total amount withdrawn across all successful withdrawals.
     pub total_amount: i128,
+}
+
+// ----------------------------------------------------------------
+//  Sustainability Metrics
+// ----------------------------------------------------------------
+
+/// Environmental impact tracking for a single deposit.
+/// Tracks carbon footprint and renewable energy assumptions.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityMetrics {
+    /// The deposit ID this metrics entry tracks.
+    pub deposit_id: u32,
+    /// The depositor address.
+    pub depositor: Address,
+    /// Carbon footprint in grams of CO2 equivalent.
+    /// Formula: amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND
+    pub carbon_footprint: i128,
+    /// Percentage of renewable energy (0-100).
+    /// Represents the energy mix for contract hosting and network operations.
+    /// Default: 50 (50% renewable).
+    pub renewable_energy_percent: u32,
+    /// Carbon offset in grams CO2e based on penalty basis points.
+    /// Formula: carbon_footprint × (penalty_bps / 10,000)
+    pub carbon_offset_grams: i128,
+    /// Timestamp when metrics were recorded.
+    pub timestamp: u64,
+}
+
+/// Aggregated sustainability report for a depositor across all deposits.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityReport {
+    /// The depositor address.
+    pub depositor: Address,
+    /// Total carbon footprint across all active deposits (grams CO2e).
+    pub total_carbon_footprint: i128,
+    /// Weighted average renewable energy percentage across deposits (0-100).
+    pub average_renewable_energy_percent: u32,
+    /// Total carbon offset across all deposits (grams CO2e).
+    pub total_carbon_offset: i128,
+    /// Number of active deposits.
+    pub active_deposit_count: u32,
+    /// Timestamp when report was generated.
+    pub report_timestamp: u64,
+}
+
+// ----------------------------------------------------------------
+//  MEV Protection Types
+// ----------------------------------------------------------------
+
+/// MEV commitment hash entry for a deposit.
+/// Stores the private commit data for reveal verification.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MEVCommitment {
+    /// The deposit ID this commitment tracks.
+    pub deposit_id: u32,
+    /// Depositor address.
+    pub depositor: Address,
+    /// Hash of the committed transaction details (Keccak256).
+    pub commit_hash: BytesN<32>,
+    /// Timestamp when the commit was submitted.
+    pub commit_time: u64,
+    /// Timestamp by which the depositor must reveal (commit_time + MEV_REVEAL_WINDOW_SECS).
+    pub reveal_deadline: u64,
+}
+
+/// MEV detection record when sandwich attack is identified.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MEVDetection {
+    /// The deposit ID where MEV was detected.
+    pub deposit_id: u32,
+    /// Depositor address.
+    pub depositor: Address,
+    /// Price deviation in basis points that triggered detection (e.g., 250 = 2.5% deviation).
+    pub deviation_bps: u32,
+    /// Amount of tokens recovered from MEV and added to recovery pool.
+    pub recovery_amount: i128,
+    /// Timestamp when detection occurred.
+    pub detection_time: u64,
+}
+
+/// MEV status for a deposit tracking the protection lifecycle.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MEVStatus {
+    /// No MEV protection has been initiated.
+    Unprotected,
+    /// Commit has been submitted, awaiting reveal.
+    Committed,
+    /// Commit has been revealed and verified.
+    Revealed,
+    /// Sandwich attack detected after reveal.
+    AttackDetected,
+}
+
+/// Price sample for TWAP calculation to detect price manipulation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceSample {
+    /// Token address.
+    pub token: Address,
+    /// Price at sample time.
+    pub price: i128,
+    /// Ledger sequence when sample was recorded.
+    pub ledger_sequence: u32,
+    /// Timestamp when sample was recorded.
+    pub timestamp: u64,
 }

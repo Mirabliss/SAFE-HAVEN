@@ -6469,3 +6469,234 @@ fn test_batch_withdraw_partial_success_mixed_state() {
     // Verify the unlocked deposit is gone
     assert!(vault.get_vault(&alice, &unlocked_id).is_none());
 }
+
+
+// ================================================================
+//  Renewable Energy Percentage Tests
+// ================================================================
+
+#[test]
+fn test_renewable_energy_percent_default_value() {
+    use crate::constants::RENEWABLE_ENERGY_BASELINE;
+    
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    
+    // Deposit without specifying renewable_energy_percent (None)
+    let deposit_id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+    
+    let metrics = vault.get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+    
+    // Should use default value (50%)
+    assert_eq!(metrics.renewable_energy_percent, RENEWABLE_ENERGY_BASELINE);
+}
+
+#[test]
+fn test_renewable_energy_percent_custom_values() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    
+    // Test various valid renewable energy percentages
+    let test_values = [0u32, 25, 50, 75, 100];
+    
+    for renewable_pct in &test_values {
+        let deposit_id = vault.deposit(
+            &alice, 
+            &token, 
+            &1_000, 
+            &unlock_time, 
+            &0,
+            &Some(*renewable_pct)
+        ).expect("deposit should succeed");
+        
+        let metrics = vault.get_sustainability_metrics(&alice, &deposit_id)
+            .expect("metrics should exist");
+        
+        assert_eq!(
+            metrics.renewable_energy_percent,
+            *renewable_pct,
+            "renewable energy percent should match configured value"
+        );
+    }
+}
+
+#[test]
+fn test_renewable_energy_percent_validation_zero_to_hundred() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    
+    // Valid boundary values
+    let valid_values = [0u32, 1, 50, 99, 100];
+    for pct in &valid_values {
+        let result = vault.deposit(
+            &alice,
+            &token,
+            &1_000,
+            &unlock_time,
+            &0,
+            &Some(*pct)
+        );
+        assert!(result.is_ok(), "renewable energy percent {} should be valid", pct);
+    }
+}
+
+#[test]
+fn test_renewable_energy_percent_validation_exceeds_hundred() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    
+    // Invalid values > 100
+    let invalid_values = [101u32, 150, 1000, u32::MAX];
+    for pct in &invalid_values {
+        let result = vault.deposit(
+            &alice,
+            &token,
+            &1_000,
+            &unlock_time,
+            &0,
+            &Some(*pct)
+        );
+        assert!(result.is_err(), "renewable energy percent {} should be invalid (>100)", pct);
+        assert_eq!(result.unwrap_err(), 28); // InvalidRenewableEnergyPercent error code
+    }
+}
+
+#[test]
+fn test_deposit_for_with_renewable_energy() {
+    use crate::constants::RENEWABLE_ENERGY_BASELINE;
+    
+    let (env, vault, token, _admin, alice, bob) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let custom_renewable = 75u32;
+    
+    // Alice deposits for Bob with custom renewable energy percent
+    let deposit_id = vault.deposit_for(
+        &alice,
+        &bob,
+        &token,
+        &1_000,
+        &unlock_time,
+        &0,
+        &Some(custom_renewable)
+    ).expect("deposit_for should succeed");
+    
+    let metrics = vault.get_sustainability_metrics(&bob, &deposit_id)
+        .expect("metrics should exist");
+    
+    assert_eq!(metrics.renewable_energy_percent, custom_renewable);
+    assert_eq!(metrics.depositor, bob);
+}
+
+#[test]
+fn test_deposit_by_ledger_with_renewable_energy() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + 100;
+    let custom_renewable = 60u32;
+    
+    let deposit_id = vault.deposit_by_ledger(
+        &alice,
+        &token,
+        &1_000,
+        &unlock_ledger,
+        &0,
+        &Some(custom_renewable)
+    ).expect("deposit_by_ledger should succeed");
+    
+    let metrics = vault.get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+    
+    assert_eq!(metrics.renewable_energy_percent, custom_renewable);
+}
+
+#[test]
+fn test_sustainability_report_with_mixed_renewable_percentages() {
+    use crate::constants::RENEWABLE_ENERGY_BASELINE;
+    
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    
+    // Create deposits with different renewable percentages
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0, &Some(0))
+        .expect("deposit 1");
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0, &Some(50))
+        .expect("deposit 2");
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0, &Some(100))
+        .expect("deposit 3");
+    
+    let report = vault.generate_sustainability_report(&alice);
+    
+    // Average should be (0 + 50 + 100) / 3 = 50
+    assert_eq!(report.average_renewable_energy_percent, 50);
+    assert_eq!(report.active_deposit_count, 3);
+}
+
+#[test]
+fn test_renewable_energy_persistence_across_operations() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let custom_renewable = 80u32;
+    
+    let deposit_id = vault.deposit(
+        &alice,
+        &token,
+        &1_000,
+        &unlock_time,
+        &0,
+        &Some(custom_renewable)
+    ).expect("deposit should succeed");
+    
+    // Retrieve multiple times - value should persist
+    for _ in 0..3 {
+        let metrics = vault.get_sustainability_metrics(&alice, &deposit_id)
+            .expect("metrics should exist");
+        assert_eq!(metrics.renewable_energy_percent, custom_renewable);
+    }
+}
+
+#[test]
+fn test_renewable_energy_with_carbon_offset_calculation() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+    let amount = 1_000i128;
+    let penalty_bps = 5_000u32; // 50% penalty
+    let renewable_pct = 75u32;
+    
+    let deposit_id = vault.deposit(
+        &alice,
+        &token,
+        &amount,
+        &unlock_time,
+        &penalty_bps,
+        &Some(renewable_pct)
+    ).expect("deposit should succeed");
+    
+    let metrics = vault.get_sustainability_metrics(&alice, &deposit_id)
+        .expect("metrics should exist");
+    
+    // Verify renewable energy is stored correctly
+    assert_eq!(metrics.renewable_energy_percent, renewable_pct);
+    
+    // Verify carbon offset is calculated correctly
+    let expected_offset = (metrics.carbon_footprint * penalty_bps as i128) / 10_000;
+    assert_eq!(metrics.carbon_offset_grams, expected_offset);
+}

@@ -45,4 +45,6 @@ pub enum VaultError {
     InvalidSponsorshipConfig = 26,
     /// Batch size exceeds MAX_BATCH_SIZE
     BatchSizeExceeded = 27,
+    /// Renewable energy percentage must be 0-100
+    InvalidRenewableEnergyPercent = 28,
 }
