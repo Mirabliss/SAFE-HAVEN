@@ -4094,11 +4094,22 @@ fn test_staker_rewards_claimed_emits_event() {
         .unwrap();
     vault.cancel_deposit(&alice, &deposit_id).unwrap();
 
-    // Claim rewards — should emit event
+    let timestamp = env.ledger().timestamp();
+
+    // Claim rewards — should emit an address-filterable event with the claimed amount and timestamp.
     vault.claim_staker_rewards(&alice).unwrap();
 
     let events = env.events().all();
-    assert!(events.len() > 0); // Should have reward claim event
+    let (_, event) = events
+        .iter()
+        .find(|(_, event)| {
+            event.topics.len() == 2
+                && event.topics.get(0) == Symbol::new(&env, "RewardsClaimed").into_val(&env)
+                && event.topics.get(1) == alice.clone().into_val(&env)
+        })
+        .expect("rewards claimed event should be emitted and filterable by staker address");
+
+    assert_eq!(event.data, (70_i128, timestamp).into_val(&env));
 }
 
 #[test]

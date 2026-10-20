@@ -295,3 +295,10 @@ pub fn staker_registered(env: &Env, staker: &Address, amount: i128) {
     env.events()
         .publish(topics, (amount, env.ledger().timestamp()));
 }
+
+/// Emitted when a staker successfully claims rewards.
+pub fn rewards_claimed(env: &Env, staker: &Address, amount: i128) {
+    let topics = (Symbol::new(env, "RewardsClaimed"), staker.clone());
+    env.events()
+        .publish(topics, (amount, env.ledger().timestamp()));
+}
