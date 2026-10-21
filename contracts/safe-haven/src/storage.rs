@@ -1,5 +1,6 @@
 use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
+use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, SessionKeyEntry, MAX_LOCK_DURATION_SECS};
 use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
 use crate::types::CircuitBreakerActivation;
 
@@ -1480,6 +1481,21 @@ pub fn set_milestone_bitmap(env: &Env, depositor: &Address, bitmap: u32) {
 }
 
 
+// ----------------------------------------------------------------
+//  Session key helpers
+// ----------------------------------------------------------------
+
+/// Get a session key entry by delegator and session key ID.
+pub fn get_session_key(env: &Env, delegator: &Address, key_id: u32) -> Option<SessionKeyEntry> {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, SessionKeyEntry>(&VaultKey::SessionKey(delegator.clone(), key_id))
+}
+
+/// Set a session key entry.
+pub fn set_session_key(env: &Env, delegator: &Address, key_id: u32, entry: &SessionKeyEntry) {
+    let key = VaultKey::SessionKey(delegator.clone(), key_id);
+    env.storage().persistent().set(&key, entry);
 // ================================================================
 //  NFT Evolution helpers
 // ================================================================
@@ -1498,6 +1514,51 @@ pub fn set_nft_evolution(
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Remove a session key entry.
+pub fn delete_session_key(env: &Env, delegator: &Address, key_id: u32) {
+    let key = VaultKey::SessionKey(delegator.clone(), key_id);
+    env.storage().persistent().remove(&key);
+}
+
+/// Get the next session key ID for a delegator (and increment counter).
+pub fn get_and_increment_session_key_counter(env: &Env, delegator: &Address) -> u32 {
+    let counter_key = VaultKey::SessionKeyCounter(delegator.clone());
+    let current: u32 = env.storage()
+        .persistent()
+        .get::<VaultKey, u32>(&counter_key)
+        .unwrap_or(0);
+    let next_id = current.saturating_add(1);
+    env.storage().persistent().set(&counter_key, &next_id);
+    env.storage()
+        .persistent()
+        .extend_ttl(&counter_key, BUMP_THRESHOLD, BUMP_TARGET);
+    current
+}
+
+/// Get the active session key IDs for a delegator.
+pub fn get_active_session_key_ids(env: &Env, delegator: &Address) -> Vec<u32> {
+    let key = VaultKey::ActiveSessionKeyIds(delegator.clone());
+    env.storage()
+        .persistent()
+        .get::<VaultKey, Vec<u32>>(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Set the active session key IDs for a delegator.
+pub fn set_active_session_key_ids(env: &Env, delegator: &Address, ids: &Vec<u32>) {
+    let key = VaultKey::ActiveSessionKeyIds(delegator.clone());
+    env.storage().persistent().set(&key, ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Add a session key ID to the active list for a delegator.
+pub fn add_active_session_key_id(env: &Env, delegator: &Address, key_id: u32) {
+    let mut ids = get_active_session_key_ids(env, delegator);
+    ids.push_back(key_id);
+    set_active_session_key_ids(env, delegator, &ids);
+}
 /// Retrieve an NFT evolution record (mutable path — extends TTL).
 pub fn get_nft_evolution(
     env: &Env,

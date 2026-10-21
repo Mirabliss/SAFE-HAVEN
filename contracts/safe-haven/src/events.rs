@@ -265,6 +265,46 @@ pub fn interest_accrued(
         .publish(topics, (deposit_id, old_amount, new_amount));
 }
 
+
+/// Emitted when a session key is created.
+pub fn session_key_created(
+    env: &Env,
+    delegator: &Address,
+    delegate: &Address,
+    key_id: u32,
+    max_amount: i128,
+    expires_at: u64,
+) {
+    let topics = (Symbol::new(env, "sk_created"), delegator.clone(), delegate.clone());
+    env.events()
+        .publish(topics, (key_id, max_amount, expires_at));
+}
+
+/// Emitted when a session key is revoked.
+pub fn session_key_revoked(
+    env: &Env,
+    delegator: &Address,
+    key_id: u32,
+) {
+    let topics = (Symbol::new(env, "sk_revoked"), delegator.clone());
+    env.events()
+        .publish(topics, key_id);
+}
+
+/// Emitted when a deposit is made using a session key.
+pub fn deposit_with_session_key(
+    env: &Env,
+    depositor: &Address,
+    delegate: &Address,
+    token: &Address,
+    amount: i128,
+    session_key_id: u32,
+    deposit_id: u32,
+) {
+    let topics = (Symbol::new(env, "dep_sk"), delegate.clone(), token.clone());
+    env.events()
+        .publish(topics, (depositor.clone(), amount, session_key_id, deposit_id));
+}
 /// Emitted when a deposit NFT evolves to a new stage.
 pub fn nft_evolved(
     env: &Env,

@@ -19,6 +19,9 @@ pub const MAX_TOKENS_PER_DEPOSIT: u32 = 5;
 /// Emergency withdrawals at or above this cumulative amount in one ledger trip the circuit breaker.
 pub const MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER: i128 = 100_000_000;
 
+/// Maximum duration for a session key (default: 30 days in seconds).
+pub const MAX_SESSION_KEY_DURATION_SECS: u64 = 2_592_000;
+
 /// Current storage schema version. Bump this constant when the on-chain
 /// layout of a `contracttype` struct changes so `migrate()` can detect
 /// and upgrade stale entries.
@@ -102,6 +105,12 @@ pub enum VaultKey {
     RewardsPool,
     /// Rewards claimed by a staker (track cumulative for auditing)
     StakerRewardsClaimed(Address),
+    /// Session key entry: maps (delegator, session_key_id) to SessionKeyEntry
+    SessionKey(Address, u32),
+    /// Session key counter for a delegator (incremented on each create_session_key)
+    SessionKeyCounter(Address),
+    /// Active session key IDs for a delegator (stores Vec<u32>)
+    ActiveSessionKeyIds(Address),
     /// Sustainability timing and totals keyed by depositor.
     SustainabilityMetrics(Address, u32),
     TotalCarbonFootprint(Address),
@@ -232,6 +241,34 @@ pub struct StakerEntry {
 /// Sponsorship fund configuration and state
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DepositType {
+    /// Timestamp-based (`VaultEntry`) single-token deposit.
+    TimeBased,
+    /// Ledger-sequence-based (`LedgerVaultEntry`) deposit.
+    LedgerBased,
+    /// Multi-token timestamp-based deposit (`MultiTokenVaultEntry`). (issue #330)
+    MultiToken,
+}
+
+/// Session key entry for delegated funding authority.
+/// Allows a delegate to make deposits on behalf of a delegator.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionKeyEntry {
+    /// The delegator who authorized this session key
+    pub delegator: Address,
+    /// The delegate who can use this session key to make deposits
+    pub delegate: Address,
+    /// Maximum amount that can be deposited using this key (0 = unlimited)
+    pub max_amount: i128,
+    /// Expiration timestamp (seconds since epoch)
+    pub expires_at: u64,
+    /// Whether this session key is revoked (permanently disabled)
+    pub is_revoked: bool,
+    /// Total amount already deposited via this session key
+    pub amount_used: i128,
+    /// Timestamp when this session key was created
+    pub created_at: u64,
 pub struct SponsorshipFund {
     /// Balance of native tokens available for sponsorship
     pub balance: i128,

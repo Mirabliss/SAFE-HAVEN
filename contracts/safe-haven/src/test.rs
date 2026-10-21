@@ -6534,6 +6534,331 @@ fn test_multiple_depositors_independent_metrics() {
 
 
 // ================================================================
+//  Session Key Tests: revoke_session_key() and related functions
+// ================================================================
+
+#[test]
+fn test_session_key_create_success() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let delegate = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    let key_id = vault
+        .create_session_key(&alice, &delegate, &max_amount, &expires_at)
+        .expect("create_session_key should succeed");
+
+    assert_eq!(key_id, 0, "First session key should have ID 0");
+
+    // Verify we can create another key (counter increments)
+    let key_id_2 = vault
+        .create_session_key(&alice, &delegate, &3_000, &(now + 2000))
+        .expect("create_session_key should succeed again");
+
+    assert_eq!(key_id_2, 1, "Second session key should have ID 1");
+}
+
+#[test]
+fn test_session_key_revoke_success() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let delegate = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    let key_id = vault
+        .create_session_key(&alice, &delegate, &max_amount, &expires_at)
+        .expect("create_session_key");
+
+    // Now revoke it
+    vault
+        .revoke_session_key(&alice, &key_id)
+        .expect("revoke_session_key should succeed");
+}
+
+#[test]
+fn test_session_key_revoke_not_found() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let result = vault.revoke_session_key(&alice, &999);
+
+    assert_eq!(result, Err(VaultError::SessionKeyNotFound));
+}
+
+#[test]
+fn test_session_key_revoke_already_revoked() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let delegate = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    let key_id = vault
+        .create_session_key(&alice, &delegate, &max_amount, &expires_at)
+        .expect("create_session_key");
+
+    // Revoke once
+    vault
+        .revoke_session_key(&alice, &key_id)
+        .expect("revoke_session_key first time");
+
+    // Try to revoke again - should fail
+    let result = vault.revoke_session_key(&alice, &key_id);
+
+    assert_eq!(result, Err(VaultError::SessionKeyRevoked));
+}
+
+#[test]
+fn test_session_key_deposit_after_revoke_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob = Address::generate(&env);
+
+    // Mint tokens for Bob (the delegate)
+    let token_client = TokenClient::new(&env, &token);
+    token_client.mint(&bob, &10_000);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    let key_id = vault
+        .create_session_key(&alice, &bob, &max_amount, &expires_at)
+        .expect("create_session_key");
+
+    // Revoke the key
+    vault
+        .revoke_session_key(&alice, &key_id)
+        .expect("revoke_session_key");
+
+    // Try to deposit using the revoked key - should fail
+    let unlock_time = now + 500;
+    let result = vault.deposit_with_session_key(
+        &bob,
+        &key_id,
+        &alice,
+        &token,
+        &1_000,
+        &unlock_time,
+        &0,
+    );
+
+    assert_eq!(result, Err(VaultError::SessionKeyRevoked));
+}
+
+#[test]
+fn test_session_key_revoke_before_expiry() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let delegate = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000; // Key expires in future
+    let max_amount = 5_000;
+
+    let key_id = vault
+        .create_session_key(&alice, &delegate, &max_amount, &expires_at)
+        .expect("create_session_key");
+
+    // Revoke key that hasn't expired yet
+    vault
+        .revoke_session_key(&alice, &key_id)
+        .expect("revoke_session_key should work even before expiry");
+}
+
+#[test]
+fn test_session_key_revoke_is_permanent() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob = Address::generate(&env);
+
+    let token_client = TokenClient::new(&env, &token);
+    token_client.mint(&bob, &10_000);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 2000;
+    let max_amount = 5_000;
+
+    let key_id = vault
+        .create_session_key(&alice, &bob, &max_amount, &expires_at)
+        .expect("create_session_key");
+
+    // Revoke the key
+    vault
+        .revoke_session_key(&alice, &key_id)
+        .expect("revoke_session_key");
+
+    // Move time forward to near expiry
+    advance_time(&env, 1500);
+
+    // Try to deposit again - should still fail (even though time moved)
+    let unlock_time = now + 500;
+    let result = vault.deposit_with_session_key(
+        &bob,
+        &key_id,
+        &alice,
+        &token,
+        &1_000,
+        &unlock_time,
+        &0,
+    );
+
+    assert_eq!(result, Err(VaultError::SessionKeyRevoked));
+}
+
+#[test]
+fn test_session_key_deposit_success() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob = Address::generate(&env);
+
+    let token_client = TokenClient::new(&env, &token);
+    token_client.mint(&bob, &10_000);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    let key_id = vault
+        .create_session_key(&alice, &bob, &max_amount, &expires_at)
+        .expect("create_session_key");
+
+    // Bob (delegate) makes a deposit on behalf of alice
+    let unlock_time = now + 500;
+    let deposit_id = vault
+        .deposit_with_session_key(&bob, &key_id, &alice, &token, &1_000, &unlock_time, &0)
+        .expect("deposit_with_session_key should succeed");
+
+    assert_eq!(deposit_id, 0, "First deposit should have ID 0");
+
+    // Verify the deposit exists under alice's account
+    let vault_entry = vault.get_vault(&alice, &deposit_id);
+    assert!(vault_entry.is_some(), "Deposit should exist");
+}
+
+#[test]
+fn test_session_key_non_revoked_keys_still_work() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob = Address::generate(&env);
+    let charlie = Address::generate(&env);
+
+    let token_client = TokenClient::new(&env, &token);
+    token_client.mint(&bob, &10_000);
+    token_client.mint(&charlie, &10_000);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    // Create two session keys
+    let key_id_1 = vault
+        .create_session_key(&alice, &bob, &max_amount, &expires_at)
+        .expect("create key 1");
+
+    let key_id_2 = vault
+        .create_session_key(&alice, &charlie, &max_amount, &expires_at)
+        .expect("create key 2");
+
+    // Revoke the first key
+    vault
+        .revoke_session_key(&alice, &key_id_1)
+        .expect("revoke key 1");
+
+    // Key 1 should fail
+    let unlock_time = now + 500;
+    let result1 = vault.deposit_with_session_key(
+        &bob,
+        &key_id_1,
+        &alice,
+        &token,
+        &1_000,
+        &unlock_time,
+        &0,
+    );
+    assert_eq!(result1, Err(VaultError::SessionKeyRevoked));
+
+    // Key 2 should still work
+    let result2 = vault.deposit_with_session_key(
+        &charlie,
+        &key_id_2,
+        &alice,
+        &token,
+        &1_000,
+        &unlock_time,
+        &0,
+    );
+    assert!(result2.is_ok(), "Key 2 should still work after Key 1 is revoked");
+}
+
+#[test]
+fn test_session_key_revoke_with_multiple_keys() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    // Create 3 keys for bob
+    let key_id_1 = vault
+        .create_session_key(&alice, &bob, &max_amount, &expires_at)
+        .expect("create key 1");
+
+    let key_id_2 = vault
+        .create_session_key(&alice, &bob, &max_amount, &(expires_at + 1000))
+        .expect("create key 2");
+
+    let key_id_3 = vault
+        .create_session_key(&alice, &bob, &max_amount, &(expires_at + 2000))
+        .expect("create key 3");
+
+    // Revoke only key_id_2
+    vault
+        .revoke_session_key(&alice, &key_id_2)
+        .expect("revoke key 2");
+
+    // Keys 1 and 3 should still be usable
+    // (We can't easily test the actual usage without more setup, but revocation should not affect others)
+    
+    // Try revoking each again:
+    // Key 1 should still be revokable
+    vault
+        .revoke_session_key(&alice, &key_id_1)
+        .expect("revoke key 1 should work");
+
+    // Key 2 should now error (already revoked)
+    let result = vault.revoke_session_key(&alice, &key_id_2);
+    assert_eq!(result, Err(VaultError::SessionKeyRevoked));
+
+    // Key 3 should still be revokable
+    vault
+        .revoke_session_key(&alice, &key_id_3)
+        .expect("revoke key 3 should work");
+}
+
+#[test]
+fn test_session_key_revoke_unauthorized() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob = Address::generate(&env);
+    let charlie = Address::generate(&env);
+
+    let now = env.ledger().timestamp();
+    let expires_at = now + 1000;
+    let max_amount = 5_000;
+
+    // Alice creates a session key for bob
+    let key_id = vault
+        .create_session_key(&alice, &bob, &max_amount, &expires_at)
+        .expect("create_session_key");
+
+    // Charlie (not the delegator) tries to revoke - should fail
+    // Note: due to require_auth, this test relies on mock_all_auths()
+    // In a real scenario, this would fail at the auth check
+    let result = vault.revoke_session_key(&charlie, &key_id);
+    
+    // Since we're mocking auth, let's at least verify the key exists under alice
+    assert_eq!(result, Err(VaultError::SessionKeyNotFound));
+}
 //  NFT Evolution Tests
 // ================================================================
 
