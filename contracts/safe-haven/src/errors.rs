@@ -29,6 +29,8 @@ pub enum VaultError {
     RecipientNotWhitelisted = 18,
     /// Compound frequency must be >= 60 seconds if non-zero (issue #332).
     InvalidCompoundFrequency = 19,
+    /// Emergency withdrawal would exceed the per-ledger hard cap.
+    EmergencyWithdrawalLimitExceeded = 20,
     /// Sponsorship fund not initialized
     SponsorshipNotInitialized = 20,
     /// User not eligible for sponsorship

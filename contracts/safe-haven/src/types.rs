@@ -102,6 +102,11 @@ pub enum VaultKey {
     RewardsPool,
     /// Rewards claimed by a staker (track cumulative for auditing)
     StakerRewardsClaimed(Address),
+    /// Sustainability timing and totals keyed by depositor.
+    SustainabilityMetrics(Address, u32),
+    TotalCarbonFootprint(Address),
+    TotalCarbonOffset(Address),
+    MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
 }
@@ -146,6 +151,28 @@ pub struct LedgerVaultEntry {
     pub penalty_bps: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityMetrics {
+    pub deposit_id: u32,
+    pub depositor: Address,
+    pub carbon_footprint: i128,
+    pub renewable_energy_percent: u32,
+    pub carbon_offset_grams: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityReport {
+    pub depositor: Address,
+    pub total_carbon_footprint: i128,
+    pub average_renewable_energy_percent: u32,
+    pub total_carbon_offset: i128,
+    pub active_deposit_count: u32,
+    pub report_timestamp: u64,
+}
+
 /// A single token+amount pair used in multi-token deposits (issue #330).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,6 +207,8 @@ pub enum DepositType {
     /// Multi-token timestamp-based deposit (`MultiTokenVaultEntry`). (issue #330)
     MultiToken,
 }
+
+pub const MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER: i128 = 1_000_000;
 
 /// Paginated query result for depositor addresses.
 /// (Soroban `#[contracttype]` does not support generics.)

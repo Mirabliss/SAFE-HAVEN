@@ -23,6 +23,10 @@ pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 /// Minimum number of ledgers required for a ledger-based deposit (~60 seconds at 5 s/ledger).
 pub const MIN_LOCK_LEDGERS: u32 = (MIN_LOCK_DURATION_SECS / LEDGER_SECONDS) as u32;
 
+pub const EPOCH_SIZE_LEDGERS: u32 = 1_440;
+pub const WITHDRAWAL_LIMIT_PER_EPOCH: i128 = 50_000_000;
+pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
+pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
 /// Maximum number of ledgers allowed for a ledger-based deposit, equivalent to
 /// `MAX_LOCK_DURATION_SECS` converted at the nominal 5-second ledger rate.
 ///
