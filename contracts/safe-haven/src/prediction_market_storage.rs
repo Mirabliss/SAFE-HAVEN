@@ -2,11 +2,11 @@
 //  Prediction Markets - Storage Helpers
 // ============================================================
 
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{Address, Env, String, Vec};
 
+use crate::constants::MAX_LOCK_DURATION_SECS;
 use crate::prediction_market_types::{
-    PredictionMarket, MarketOutcome, Bet, BetKey, MarketConfig, OracleResolution,
-    MAX_LOCK_DURATION_SECS,
+    Bet, MarketConfig, MarketOutcome, OracleResolution, PredictionMarket,
 };
 
 // Storage key types for prediction markets
@@ -202,4 +202,53 @@ pub fn calculate_outcome_winnings(
 pub fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
     let key = soroban_sdk::Symbol::from_str(env, &format!("pmo_{}_{}", market_id, outcome_id));
     env.storage().persistent().get(&key)
+}
+
+// ================================================================
+//  Outcome Names List Storage (Issue #100)
+//
+//  Stores the ordered Vec<String> of outcome names for a market
+//  under a dedicated key "pmon_{market_id}". This ensures names
+//  are stored in order, retrievable by index (outcome_id), and
+//  the count is maintained as the length of the Vec.
+// ================================================================
+
+/// Persist the ordered list of outcome names for a market.
+/// Key format: `pmon_{market_id}`
+pub fn set_outcome_names_list(env: &Env, market_id: u32, names: &Vec<String>) {
+    let key = soroban_sdk::Symbol::from_str(env, &format!("pmon_{}", market_id));
+    env.storage().persistent().set(&key, names);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
+}
+
+/// Retrieve the ordered list of outcome names for a market.
+/// Returns `None` if no names list has been stored for this market.
+pub fn get_outcome_names_list(env: &Env, market_id: u32) -> Option<Vec<String>> {
+    let key = soroban_sdk::Symbol::from_str(env, &format!("pmon_{}", market_id));
+    let result: Option<Vec<String>> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
+    }
+    result
+}
+
+/// Retrieve all outcomes for a market as an ordered `Vec<MarketOutcome>`.
+///
+/// Outcomes are returned in `outcome_id` order (0, 1, 2, 3) by iterating
+/// up to `market.outcome_count`. Each outcome is fetched by its individual
+/// storage key `pmo_{market_id}_{outcome_id}`.
+///
+/// Returns an empty Vec if the market has no outcomes stored yet.
+pub fn get_market_outcomes(env: &Env, market_id: u32, outcome_count: u32) -> Vec<MarketOutcome> {
+    let mut outcomes = Vec::new(env);
+    for i in 0..outcome_count {
+        if let Some(outcome) = get_outcome_readonly(env, market_id, i) {
+            outcomes.push_back(outcome);
+        }
+    }
+    outcomes
 }

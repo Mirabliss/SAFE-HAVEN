@@ -1,524 +1,551 @@
 // ============================================================
-//  Prediction Markets - Comprehensive Test Suite (50+ test cases)
+//  Prediction Markets - Outcome List Storage Tests (Issue #100)
+//
+//  Verifies:
+//  - Outcome names are stored in order (2, 3, and 4 outcomes)
+//  - outcome_count matches the number of outcomes supplied
+//  - Indexing by outcome_id returns the correct name
+//  - get_market_with_outcomes returns market + all outcomes in order
+//  - get_market_outcome queries work for each valid outcome_id
+//  - Names list persisted via set_outcome_names_list is correct
 // ============================================================
 
 #[cfg(test)]
-mod prediction_market_tests {
-    use crate::{
-        prediction_market,
-        prediction_market_errors::PredictionMarketError,
-        prediction_market_types::*,
+mod prediction_market_outcome_list_tests {
+    extern crate std;
+
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, String, Vec,
     };
 
-    // ================================================================
-    //  Market Creation Tests (10 test cases)
-    // ================================================================
+    use crate::contract::{SafeHaven, SafeHavenClient};
+    use crate::prediction_market_errors::PredictionMarketError;
+    use crate::prediction_market_types::MarketStatus;
 
-    #[test]
-    fn test_create_market_valid() {
-        // Test successful market creation with valid parameters
-        // Expected: market_id = 1, status = Open
-        assert_eq!(true, true); // Placeholder for actual integration test
+    // ----------------------------------------------------------------
+    //  Test Helpers
+    // ----------------------------------------------------------------
+
+    /// Set up a fresh environment with the prediction market subsystem
+    /// initialized. Returns (env, vault_client, admin, oracle, fee_recipient).
+    fn setup_pm() -> (Env, SafeHavenClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let vault_id = env.register(SafeHaven, ());
+        let vault = SafeHavenClient::new(&env, &vault_id);
+
+        let admin = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let fee_recipient = Address::generate(&env);
+
+        // Initialize core contract (required before prediction markets)
+        vault.initialize(&admin, &fee_recipient, &None, &None);
+
+        // Initialize prediction market subsystem
+        vault
+            .init_prediction_markets(&admin, &fee_recipient, &Some(100))
+            .expect("init_prediction_markets failed");
+
+        (env, vault, admin, oracle, fee_recipient)
     }
 
-    #[test]
-    fn test_create_market_invalid_close_time_in_past() {
-        // Test market creation with close_time in past
-        // Expected: ResolutionTimeInPast error
-        assert_eq!(true, true);
+    /// Advance the simulated ledger timestamp by `seconds`.
+    fn advance_time(env: &Env, seconds: u64) {
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + seconds,
+            protocol_version: env.ledger().protocol_version(),
+            sequence_number: env.ledger().sequence(),
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 33_000_000,
+        });
     }
 
-    #[test]
-    fn test_create_market_insufficient_close_duration() {
-        // Test market creation with close_time too soon (< MIN_MARKET_DURATION_SECS)
-        // Expected: InvalidResolutionTime error
-        assert_eq!(true, true);
+    /// Build a `Vec<String>` of outcome names inside `env`.
+    fn outcome_vec(env: &Env, names: &[&str]) -> Vec<String> {
+        let mut v = Vec::new(env);
+        for n in names {
+            v.push_back(String::from_str(env, n));
+        }
+        v
     }
 
-    #[test]
-    fn test_create_market_invalid_outcome_count_too_few() {
-        // Test market creation with < 2 outcomes
-        // Expected: InvalidOutcomeCount error
-        assert_eq!(true, true);
-    }
+    /// Create a market with `names` as outcomes. Returns market_id.
+    fn create_market_with_outcomes(
+        env: &Env,
+        vault: &SafeHavenClient,
+        creator: &Address,
+        oracle: &Address,
+        names: Vec<String>,
+    ) -> u32 {
+        let now = env.ledger().timestamp();
+        let close_time = now + 7_200; // 2 hours from now
+        let resolution_deadline = close_time + 3_600; // 1 hour after close
 
-    #[test]
-    fn test_create_market_invalid_outcome_count_too_many() {
-        // Test market creation with > 4 outcomes
-        // Expected: InvalidOutcomeCount error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_create_market_resolution_deadline_before_close() {
-        // Test market creation where resolution_deadline <= close_time
-        // Expected: InvalidResolutionTime error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_create_market_insufficient_resolution_time() {
-        // Test market creation with resolution window < min_resolution_time_secs
-        // Expected: InvalidResolutionTime error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_create_market_invalid_fee_bps() {
-        // Test market creation with fee_bps > MAX_FEE_BPS (1000)
-        // Expected: InvalidFeeBps error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_create_market_increments_market_id() {
-        // Create two markets, verify IDs increment
-        // Expected: First market_id = 1, second = 2
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_create_market_when_paused() {
-        // Test market creation when subsystem is paused
-        // Expected: MarketPaused error
-        assert_eq!(true, true);
-    }
-
-    // ================================================================
-    //  Betting Tests (12 test cases)
-    // ================================================================
-
-    #[test]
-    fn test_place_bet_valid() {
-        // Test valid bet placement on an open market
-        // Expected: Bet created, outcome updated, pool increased
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_invalid_amount_zero() {
-        // Test bet with amount = 0
-        // Expected: InvalidBetAmount error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_invalid_amount_too_large() {
-        // Test bet with amount > MAX_BET_AMOUNT
-        // Expected: InvalidBetAmount error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_market_not_found() {
-        // Test bet on non-existent market_id
-        // Expected: MarketNotFound error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_market_closed() {
-        // Test bet on market after betting deadline
-        // Expected: BettingClosed error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_market_not_open() {
-        // Test bet on market with status != Open
-        // Expected: BettingClosed error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_invalid_outcome() {
-        // Test bet on outcome_id >= outcome_count
-        // Expected: InvalidOutcomeId error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_duplicate_outcome() {
-        // Test placing second bet on same outcome by same user
-        // Expected: AlreadyBetOnOutcome error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_updates_outcome() {
-        // Place bet and verify outcome total_bet_amount and bettor_count update
-        // Expected: outcome.total_bet_amount increases, bettor_count increases
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_updates_market_pool() {
-        // Place bet and verify market total_pool increases
-        // Expected: market.total_pool increases by bet amount
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_multiple_bets_different_outcomes() {
-        // Place bets on different outcomes by same user
-        // Expected: Multiple bets allowed as long as different outcomes
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_place_bet_updates_bettor_count() {
-        // Place first bet from new bettor, verify bettor_count increments once
-        // Expected: market.bettor_count increments only on first bet
-        assert_eq!(true, true);
+        vault
+            .create_prediction_market(
+                creator,
+                &String::from_str(env, "aggregate_deposits"),
+                &String::from_str(env, "Test market"),
+                oracle,
+                &close_time,
+                &resolution_deadline,
+                &names,
+                &None,
+            )
+            .expect("create_prediction_market failed")
     }
 
     // ================================================================
-    //  Market Closure Tests (5 test cases)
+    //  2-Outcome Market Tests
     // ================================================================
 
+    /// Creating a 2-outcome market stores both names, sets outcome_count = 2,
+    /// and each outcome is indexed by outcome_id 0 and 1.
     #[test]
-    fn test_close_market_by_admin() {
-        // Test admin closing an open market
-        // Expected: status changes to Closed
-        assert_eq!(true, true);
+    fn test_two_outcome_market_outcome_count() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["Yes (>1M)", "No (<=1M)"]);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        let market = vault
+            .get_prediction_market(&market_id)
+            .expect("market not found");
+
+        assert_eq!(market.outcome_count, 2, "outcome_count should be 2");
+        assert_eq!(market.status, MarketStatus::Open);
     }
 
+    /// Outcome 0 and 1 are retrievable individually with the correct names.
     #[test]
-    fn test_close_market_by_oracle() {
-        // Test oracle closing an open market
-        // Expected: status changes to Closed
-        assert_eq!(true, true);
+    fn test_two_outcome_market_indexing() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["Yes (>1M)", "No (<=1M)"]);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names.clone());
+
+        let outcome0 = vault
+            .get_market_outcome(&market_id, &0)
+            .expect("outcome 0 not found");
+        let outcome1 = vault
+            .get_market_outcome(&market_id, &1)
+            .expect("outcome 1 not found");
+
+        assert_eq!(outcome0.outcome_id, 0);
+        assert_eq!(outcome0.name, String::from_str(&env, "Yes (>1M)"));
+
+        assert_eq!(outcome1.outcome_id, 1);
+        assert_eq!(outcome1.name, String::from_str(&env, "No (<=1M)"));
     }
 
+    /// `get_market_with_outcomes` returns both the market and outcomes in order.
     #[test]
-    fn test_close_market_unauthorized() {
-        // Test non-admin, non-oracle closing market
-        // Expected: Unauthorized error
-        assert_eq!(true, true);
+    fn test_two_outcome_get_market_with_outcomes() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["Yes (>1M)", "No (<=1M)"]);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names.clone());
+
+        let mwo = vault
+            .get_market_with_outcomes(&market_id)
+            .expect("get_market_with_outcomes returned None");
+
+        // Market struct is correct
+        assert_eq!(mwo.market.market_id, market_id);
+        assert_eq!(mwo.market.outcome_count, 2);
+
+        // Outcomes Vec has exactly 2 entries
+        assert_eq!(mwo.outcomes.len(), 2);
+
+        // Order is preserved: index 0 = outcome_id 0, index 1 = outcome_id 1
+        let o0 = mwo.outcomes.get(0).expect("missing outcome at index 0");
+        let o1 = mwo.outcomes.get(1).expect("missing outcome at index 1");
+
+        assert_eq!(o0.outcome_id, 0);
+        assert_eq!(o0.name, String::from_str(&env, "Yes (>1M)"));
+        assert_eq!(o1.outcome_id, 1);
+        assert_eq!(o1.name, String::from_str(&env, "No (<=1M)"));
     }
 
+    /// Outcome index 2 does not exist on a 2-outcome market (returns None).
     #[test]
-    fn test_close_market_already_closed() {
-        // Test closing an already-closed market
-        // Expected: InvalidMarketStatus error
-        assert_eq!(true, true);
-    }
+    fn test_two_outcome_invalid_index_returns_none() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["Yes", "No"]);
 
-    #[test]
-    fn test_close_market_prevents_new_bets() {
-        // Close market, then attempt to place bet
-        // Expected: BettingClosed error on second call
-        assert_eq!(true, true);
-    }
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
 
-    // ================================================================
-    //  Market Resolution Tests (8 test cases)
-    // ================================================================
-
-    #[test]
-    fn test_resolve_market_valid() {
-        // Test oracle resolving closed market with valid outcome
-        // Expected: market.status = Resolved, winning_outcome set
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_resolve_market_not_closed() {
-        // Test resolving market that is still Open
-        // Expected: MarketNotClosedYet error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_resolve_market_unauthorized_oracle() {
-        // Test non-oracle attempting resolution
-        // Expected: UnauthorizedOracle error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_resolve_market_invalid_winning_outcome() {
-        // Test resolving with winning_outcome >= outcome_count
-        // Expected: InvalidWinningOutcome error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_resolve_market_deadline_exceeded() {
-        // Test resolving after resolution_deadline has passed
-        // Expected: ResolutionDeadlineExceeded error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_resolve_market_duplicate_submission() {
-        // Oracle submits resolution twice
-        // Expected: OracleSubmissionExists error on second submission
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_resolve_market_stores_resolution_data() {
-        // Resolve market with resolution_data (e.g., aggregate deposits)
-        // Expected: market.resolution_data set correctly
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_resolve_market_prevents_further_claims() {
-        // Verify market state locks after resolution
-        // Expected: Only resolved markets allow winnings claims
-        assert_eq!(true, true);
+        let missing = vault.get_market_outcome(&market_id, &2);
+        assert!(missing.is_none(), "outcome_id 2 should not exist on a 2-outcome market");
     }
 
     // ================================================================
-    //  Winnings Claim Tests (10 test cases)
+    //  3-Outcome Market Tests
     // ================================================================
 
+    /// Creating a 3-outcome market stores three names and sets outcome_count = 3.
     #[test]
-    fn test_claim_winnings_winning_bet() {
-        // Bettor with winning bet claims winnings
-        // Expected: Payout = (bet / winning_pool) × total_pool minus fee
-        assert_eq!(true, true);
+    fn test_three_outcome_market_outcome_count() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["High (>1M)", "Medium (500K-1M)", "Low (<500K)"]);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        let market = vault
+            .get_prediction_market(&market_id)
+            .expect("market not found");
+
+        assert_eq!(market.outcome_count, 3);
     }
 
+    /// All three outcomes are individually retrievable and in order.
     #[test]
-    fn test_claim_winnings_losing_bet() {
-        // Bettor with losing bet attempts to claim
-        // Expected: NoWinningBets error
-        assert_eq!(true, true);
+    fn test_three_outcome_market_order_preserved() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let expected = ["High (>1M)", "Medium (500K-1M)", "Low (<500K)"];
+        let names = outcome_vec(&env, &expected);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        for (idx, expected_name) in expected.iter().enumerate() {
+            let outcome = vault
+                .get_market_outcome(&market_id, &(idx as u32))
+                .unwrap_or_else(|| panic!("outcome_id {} not found", idx));
+
+            assert_eq!(
+                outcome.outcome_id,
+                idx as u32,
+                "outcome_id should be {}",
+                idx
+            );
+            assert_eq!(
+                outcome.name,
+                String::from_str(&env, expected_name),
+                "name mismatch at index {}",
+                idx
+            );
+        }
     }
 
+    /// `get_market_with_outcomes` returns market + all 3 outcomes in order.
     #[test]
-    fn test_claim_winnings_no_bet() {
-        // Non-bettor attempts to claim from market
-        // Expected: BetNotFound error
-        assert_eq!(true, true);
+    fn test_three_outcome_get_market_with_outcomes() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let expected = ["High (>1M)", "Medium (500K-1M)", "Low (<500K)"];
+        let names = outcome_vec(&env, &expected);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        let mwo = vault
+            .get_market_with_outcomes(&market_id)
+            .expect("get_market_with_outcomes returned None");
+
+        assert_eq!(mwo.market.outcome_count, 3);
+        assert_eq!(mwo.outcomes.len(), 3);
+
+        for (idx, expected_name) in expected.iter().enumerate() {
+            let o = mwo
+                .outcomes
+                .get(idx as u32)
+                .unwrap_or_else(|| panic!("missing outcome at index {}", idx));
+            assert_eq!(o.outcome_id, idx as u32);
+            assert_eq!(o.name, String::from_str(&env, expected_name));
+        }
     }
 
+    /// Outcome index 3 does not exist on a 3-outcome market.
     #[test]
-    fn test_claim_winnings_before_resolution() {
-        // Attempt to claim before market resolved
-        // Expected: ClaimingBeforeResolution error
-        assert_eq!(true, true);
-    }
+    fn test_three_outcome_invalid_index_returns_none() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["A", "B", "C"]);
 
-    #[test]
-    fn test_claim_winnings_already_claimed() {
-        // Bettor claims winnings twice
-        // Expected: BetsAlreadyClaimed error on second claim
-        assert_eq!(true, true);
-    }
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
 
-    #[test]
-    fn test_claim_winnings_applies_fee() {
-        // Verify fee is deducted from winnings
-        // Expected: fee = (winnings × fee_bps) / 10_000
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_claim_winnings_fee_recipient_receives() {
-        // Verify fee is transferred to fee_recipient
-        // Expected: fee_recipient balance increases by fee amount
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_claim_winnings_proportional_distribution() {
-        // Multiple winning bets, verify proportional payout
-        // Expected: Each winner receives (bet / total_winning) × total_pool
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_claim_winnings_single_winner() {
-        // Only one bettor on winning outcome
-        // Expected: Winner receives entire pool minus fee
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_claim_winnings_all_outcomes_some_bets() {
-        // Bets on multiple outcomes, verify only winners can claim
-        // Expected: Losers get NoWinningBets, winners get payout
-        assert_eq!(true, true);
-    }
-
-    // ================================================================
-    //  Market Cancellation Tests (4 test cases)
-    // ================================================================
-
-    #[test]
-    fn test_cancel_market_admin_only() {
-        // Non-admin attempts to cancel
-        // Expected: Unauthorized error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_cancel_market_already_resolved() {
-        // Attempt to cancel resolved market
-        // Expected: MarketAlreadyResolved error
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_cancel_market_refunds_bets() {
-        // Cancel market with bets, verify total refunded
-        // Expected: total_refunded = sum of all bets
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_cancel_market_status_changes() {
-        // Verify market.status changes to Cancelled
-        // Expected: status = Cancelled after cancellation
-        assert_eq!(true, true);
+        let missing = vault.get_market_outcome(&market_id, &3);
+        assert!(missing.is_none(), "outcome_id 3 should not exist on a 3-outcome market");
     }
 
     // ================================================================
-    //  Oracle Manipulation Resistance Tests (6 test cases)
+    //  4-Outcome Market Tests
     // ================================================================
 
+    /// Creating a 4-outcome market stores four names and sets outcome_count = 4.
     #[test]
-    fn test_oracle_resolution_requires_auth() {
-        // Attempt oracle resolution without auth
-        // Expected: require_auth check fails
-        assert_eq!(true, true);
+    fn test_four_outcome_market_outcome_count() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(
+            &env,
+            &["Tier A (>2M)", "Tier B (1M-2M)", "Tier C (500K-1M)", "Tier D (<500K)"],
+        );
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        let market = vault
+            .get_prediction_market(&market_id)
+            .expect("market not found");
+
+        assert_eq!(market.outcome_count, 4);
     }
 
+    /// All four outcomes are individually retrievable by outcome_id.
     #[test]
-    fn test_oracle_cannot_resolve_open_market() {
-        // Oracle attempts to resolve before market closed
-        // Expected: MarketNotClosedYet error
-        assert_eq!(true, true);
+    fn test_four_outcome_market_indexing_by_outcome_id() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let expected = ["Tier A (>2M)", "Tier B (1M-2M)", "Tier C (500K-1M)", "Tier D (<500K)"];
+        let names = outcome_vec(&env, &expected);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        for (idx, expected_name) in expected.iter().enumerate() {
+            let outcome = vault
+                .get_market_outcome(&market_id, &(idx as u32))
+                .unwrap_or_else(|| panic!("outcome_id {} not found", idx));
+
+            assert_eq!(outcome.outcome_id, idx as u32);
+            assert_eq!(outcome.name, String::from_str(&env, expected_name));
+        }
     }
 
+    /// `get_market_with_outcomes` returns market + all 4 outcomes in order.
     #[test]
-    fn test_oracle_resolution_deadline_enforcement() {
-        // Oracle attempts resolution past deadline
-        // Expected: ResolutionDeadlineExceeded error
-        assert_eq!(true, true);
+    fn test_four_outcome_get_market_with_outcomes() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let expected = ["Tier A (>2M)", "Tier B (1M-2M)", "Tier C (500K-1M)", "Tier D (<500K)"];
+        let names = outcome_vec(&env, &expected);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        let mwo = vault
+            .get_market_with_outcomes(&market_id)
+            .expect("get_market_with_outcomes returned None");
+
+        assert_eq!(mwo.market.market_id, market_id);
+        assert_eq!(mwo.market.outcome_count, 4);
+        assert_eq!(mwo.outcomes.len(), 4);
+
+        for (idx, expected_name) in expected.iter().enumerate() {
+            let o = mwo
+                .outcomes
+                .get(idx as u32)
+                .unwrap_or_else(|| panic!("missing outcome at index {}", idx));
+            assert_eq!(o.outcome_id, idx as u32);
+            assert_eq!(o.name, String::from_str(&env, expected_name));
+        }
     }
 
+    /// Outcome index 4 does not exist on a 4-outcome market (max is 3).
     #[test]
-    fn test_resolution_submission_tracked() {
-        // Verify oracle submission is persisted
-        // Expected: OracleResolution stored with correct data
-        assert_eq!(true, true);
+    fn test_four_outcome_invalid_index_returns_none() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["A", "B", "C", "D"]);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        let missing = vault.get_market_outcome(&market_id, &4);
+        assert!(missing.is_none(), "outcome_id 4 should not exist on a 4-outcome market");
     }
 
+    /// Creating a 4-outcome market (MAX) succeeds; 5 outcomes is rejected.
     #[test]
-    fn test_multiple_oracle_rejects_duplicate() {
-        // Oracle submits twice (if multi-oracle design)
-        // Expected: OracleSubmissionExists error on second
-        assert_eq!(true, true);
+    fn test_max_outcomes_is_four() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+
+        // 4 outcomes — should succeed
+        let names_4 = outcome_vec(&env, &["A", "B", "C", "D"]);
+        let now = env.ledger().timestamp();
+        let result = vault.create_prediction_market(
+            &admin,
+            &String::from_str(&env, "aggregate_deposits"),
+            &String::from_str(&env, "4-outcome test"),
+            &oracle,
+            &(now + 7_200),
+            &(now + 10_800),
+            &names_4,
+            &None,
+        );
+        assert!(result.is_ok(), "4 outcomes should be valid");
+
+        // 5 outcomes — should be rejected
+        let names_5 = outcome_vec(&env, &["A", "B", "C", "D", "E"]);
+        let result = vault.try_create_prediction_market(
+            &admin,
+            &String::from_str(&env, "aggregate_deposits"),
+            &String::from_str(&env, "5-outcome test"),
+            &oracle,
+            &(now + 7_200),
+            &(now + 10_800),
+            &names_5,
+            &None,
+        );
+        assert!(result.is_err(), "5 outcomes should be rejected");
     }
 
+    /// Creating a 2-outcome market (MIN) succeeds; 1 outcome is rejected.
     #[test]
-    fn test_invalid_winning_outcome_blocks_resolution() {
-        // Oracle submits invalid outcome_id
-        // Expected: InvalidWinningOutcome error
-        assert_eq!(true, true);
+    fn test_min_outcomes_is_two() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+
+        // 2 outcomes — should succeed
+        let names_2 = outcome_vec(&env, &["Yes", "No"]);
+        let now = env.ledger().timestamp();
+        let result = vault.create_prediction_market(
+            &admin,
+            &String::from_str(&env, "aggregate_deposits"),
+            &String::from_str(&env, "2-outcome test"),
+            &oracle,
+            &(now + 7_200),
+            &(now + 10_800),
+            &names_2,
+            &None,
+        );
+        assert!(result.is_ok(), "2 outcomes should be valid");
+
+        // 1 outcome — should be rejected
+        let names_1 = outcome_vec(&env, &["Only"]);
+        let result = vault.try_create_prediction_market(
+            &admin,
+            &String::from_str(&env, "aggregate_deposits"),
+            &String::from_str(&env, "1-outcome test"),
+            &oracle,
+            &(now + 7_200),
+            &(now + 10_800),
+            &names_1,
+            &None,
+        );
+        assert!(result.is_err(), "1 outcome should be rejected");
     }
 
     // ================================================================
-    //  Edge Cases & Security Tests (8 test cases)
+    //  Storage Persistence & Order Tests
     // ================================================================
 
+    /// Outcome names list is retrievable via the storage helper after creation.
+    /// This test calls the storage function directly to verify the list key.
     #[test]
-    fn test_empty_pool_winnings_calculation() {
-        // Market with no bets resolves
-        // Expected: Winnings calculation handles zero pool gracefully
-        assert_eq!(true, true);
+    fn test_outcome_names_list_stored_in_order() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let expected = ["Alpha", "Beta", "Gamma"];
+        let names = outcome_vec(&env, &expected);
+
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
+
+        // Read back via storage helper
+        let stored_names =
+            crate::prediction_market_storage::get_outcome_names_list(&env, market_id)
+                .expect("outcome names list not found");
+
+        assert_eq!(stored_names.len(), 3);
+        for (idx, expected_name) in expected.iter().enumerate() {
+            assert_eq!(
+                stored_names.get(idx as u32).expect("name not found"),
+                String::from_str(&env, expected_name),
+                "name mismatch at index {}",
+                idx
+            );
+        }
     }
 
+    /// Multiple markets each maintain independent, correctly-ordered outcome lists.
     #[test]
-    fn test_single_outcome_has_bets() {
-        // All bets on one outcome, that outcome wins
-        // Expected: All bettors paid from full pool
-        assert_eq!(true, true);
+    fn test_independent_markets_preserve_their_own_outcome_order() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+
+        let names_a = outcome_vec(&env, &["Yes", "No"]);
+        let names_b = outcome_vec(&env, &["High", "Medium", "Low"]);
+        let names_c = outcome_vec(&env, &["Q1", "Q2", "Q3", "Q4"]);
+
+        let id_a = create_market_with_outcomes(&env, &vault, &admin, &oracle, names_a);
+        let id_b = create_market_with_outcomes(&env, &vault, &admin, &oracle, names_b);
+        let id_c = create_market_with_outcomes(&env, &vault, &admin, &oracle, names_c);
+
+        // Market A: 2 outcomes
+        let mwo_a = vault.get_market_with_outcomes(&id_a).unwrap();
+        assert_eq!(mwo_a.outcomes.len(), 2);
+        assert_eq!(mwo_a.outcomes.get(0).unwrap().name, String::from_str(&env, "Yes"));
+        assert_eq!(mwo_a.outcomes.get(1).unwrap().name, String::from_str(&env, "No"));
+
+        // Market B: 3 outcomes
+        let mwo_b = vault.get_market_with_outcomes(&id_b).unwrap();
+        assert_eq!(mwo_b.outcomes.len(), 3);
+        assert_eq!(mwo_b.outcomes.get(0).unwrap().name, String::from_str(&env, "High"));
+        assert_eq!(mwo_b.outcomes.get(1).unwrap().name, String::from_str(&env, "Medium"));
+        assert_eq!(mwo_b.outcomes.get(2).unwrap().name, String::from_str(&env, "Low"));
+
+        // Market C: 4 outcomes
+        let mwo_c = vault.get_market_with_outcomes(&id_c).unwrap();
+        assert_eq!(mwo_c.outcomes.len(), 4);
+        assert_eq!(mwo_c.outcomes.get(0).unwrap().name, String::from_str(&env, "Q1"));
+        assert_eq!(mwo_c.outcomes.get(1).unwrap().name, String::from_str(&env, "Q2"));
+        assert_eq!(mwo_c.outcomes.get(2).unwrap().name, String::from_str(&env, "Q3"));
+        assert_eq!(mwo_c.outcomes.get(3).unwrap().name, String::from_str(&env, "Q4"));
     }
 
+    /// `get_market_with_outcomes` on a non-existent market_id returns None.
     #[test]
-    fn test_max_outcomes_market() {
-        // Create market with MAX_OUTCOMES_PER_MARKET (4)
-        // Expected: Market created successfully
-        assert_eq!(true, true);
+    fn test_get_market_with_outcomes_nonexistent_returns_none() {
+        let (env, vault, _admin, _oracle, _fee) = setup_pm();
+
+        let result = vault.get_market_with_outcomes(&9999);
+        assert!(result.is_none(), "Non-existent market_id should return None");
     }
 
+    /// Outcome initial state: total_bet_amount = 0, bettor_count = 0.
     #[test]
-    fn test_minimum_outcomes_market() {
-        // Create market with MIN_OUTCOMES_PER_MARKET (2)
-        // Expected: Market created successfully
-        assert_eq!(true, true);
-    }
+    fn test_initial_outcome_bet_amounts_are_zero() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
+        let names = outcome_vec(&env, &["Yes", "No", "Maybe"]);
 
-    #[test]
-    fn test_integer_overflow_large_bets() {
-        // Bets near i128::MAX to test overflow resistance
-        // Expected: saturating_add prevents overflow
-        assert_eq!(true, true);
-    }
+        let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
 
-    #[test]
-    fn test_fee_rounding_edge_case() {
-        // Winnings amount that creates rounding edge case
-        // Expected: Fee calculated correctly without truncation errors
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_market_subsystem_persistence() {
-        // Market created, market config updated
-        // Expected: Both survive across queries
-        assert_eq!(true, true);
-    }
-
-    #[test]
-    fn test_auth_requirements_enforced() {
-        // Verify all state-mutating functions call require_auth
-        // Expected: Unauthorized callers rejected
-        assert_eq!(true, true);
+        let mwo = vault.get_market_with_outcomes(&market_id).unwrap();
+        for idx in 0..3u32 {
+            let o = mwo.outcomes.get(idx).unwrap();
+            assert_eq!(o.total_bet_amount, 0, "outcome {} should start with 0 bet amount", idx);
+            assert_eq!(o.bettor_count, 0, "outcome {} should start with 0 bettor count", idx);
+        }
     }
 
     // ================================================================
-    //  Integration Tests (5 test cases)
+    //  Outcome Count Maintenance Tests
     // ================================================================
 
+    /// Market outcome_count equals the length of the outcomes Vec returned
+    /// by get_market_with_outcomes for all supported sizes.
     #[test]
-    fn test_full_market_lifecycle() {
-        // Create market -> bets placed -> closed -> resolved -> winners claim
-        // Expected: All steps succeed with correct state transitions
-        assert_eq!(true, true);
-    }
+    fn test_outcome_count_matches_vec_length_for_all_sizes() {
+        let (env, vault, admin, oracle, _fee) = setup_pm();
 
-    #[test]
-    fn test_multiple_concurrent_markets() {
-        // Create multiple markets, place bets on each
-        // Expected: Markets operate independently
-        assert_eq!(true, true);
-    }
+        let cases: &[&[&str]] = &[
+            &["Yes", "No"],
+            &["Low", "Med", "High"],
+            &["Q1", "Q2", "Q3", "Q4"],
+        ];
 
-    #[test]
-    fn test_market_with_zero_fee() {
-        // Market created with fee_bps = 0
-        // Expected: Winnings claimed without fee deduction
-        assert_eq!(true, true);
-    }
+        for names_slice in cases {
+            let names = outcome_vec(&env, names_slice);
+            let expected_count = names_slice.len() as u32;
 
-    #[test]
-    fn test_market_with_max_fee() {
-        // Market created with fee_bps = MAX_FEE_BPS (1000, 10%)
-        // Expected: Winnings correctly reduced by 10%
-        assert_eq!(true, true);
-    }
+            let market_id = create_market_with_outcomes(&env, &vault, &admin, &oracle, names);
 
-    #[test]
-    fn test_market_config_persistence() {
-        // Initialize markets, create market, verify config preserved
-        // Expected: Config remains consistent across operations
-        assert_eq!(true, true);
+            let mwo = vault.get_market_with_outcomes(&market_id).unwrap();
+            assert_eq!(
+                mwo.market.outcome_count,
+                expected_count,
+                "outcome_count mismatch for {} outcomes",
+                expected_count
+            );
+            assert_eq!(
+                mwo.outcomes.len(),
+                expected_count,
+                "outcomes Vec length mismatch for {} outcomes",
+                expected_count
+            );
+        }
     }
 }

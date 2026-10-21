@@ -124,7 +124,9 @@ pub fn create_market(
 
     storage::set_market(env, &market);
 
-    // Create outcomes
+    // Create outcomes and persist the ordered names list (Issue #100)
+    storage::set_outcome_names_list(env, market_id, &outcome_names);
+
     for (idx, name) in outcome_names.iter().enumerate() {
         let outcome = MarketOutcome {
             outcome_id: idx as u32,
@@ -513,8 +515,21 @@ pub fn get_bet_details(
     storage::get_bet_readonly(env, market_id, outcome_id, bettor)
 }
 
-// Helper for readonly outcome access
-fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
-    let key = soroban_sdk::Symbol::from_str(env, &format!("pmo_{}_{}", market_id, outcome_id));
-    env.storage().persistent().get(&key)
+/// Get a market together with its ordered list of outcomes (Issue #100).
+///
+/// Returns `None` if the market does not exist.
+/// The `outcomes` field is ordered by `outcome_id` (0, 1, 2 …) and its
+/// length equals `market.outcome_count`, so callers can index directly:
+///
+/// ```
+/// if let Some(mwo) = get_market_with_outcomes(env, 1) {
+///     let first_outcome = mwo.outcomes.get(0); // outcome_id 0
+/// }
+/// ```
+pub fn get_market_with_outcomes(env: &Env, market_id: u32) -> Option<MarketWithOutcomes> {
+    let market = storage::get_market_readonly(env, market_id)?;
+    let outcomes = storage::get_market_outcomes(env, market_id, market.outcome_count);
+    Some(MarketWithOutcomes { market, outcomes })
 }
+
+// Helper for readonly outcome access is provided by storage::get_outcome_readonly
