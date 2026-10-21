@@ -6365,15 +6365,42 @@ fn test_milestone_carbon_neutral() {
 
     let now = env.ledger().timestamp();
     let unlock_time = now + 100;
+    let baseline_events = env.events().all().len();
 
     // Deposit with 100% offset (penalty_bps = 10_000)
     vault.deposit(&alice, &token, &1_000, &unlock_time, &10_000)
         .expect("deposit");
 
-    // Check events were emitted (would be verified in real test setup with event capture)
-    // This test serves as a placeholder for milestone emission verification
+    let total_event_count = env.events().all().len();
+    assert_eq!(
+        total_event_count - baseline_events,
+        2,
+        "deposit should emit one milestone event when carbon neutrality is reached"
+    );
+
     let report = vault.generate_sustainability_report(&alice);
     assert_eq!(report.total_carbon_offset, report.total_carbon_footprint);
+}
+
+#[test]
+fn test_milestone_carbon_neutral_not_re_emitted() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+    let baseline_events = env.events().all().len();
+
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &10_000)
+        .expect("first deposit");
+    vault.deposit(&alice, &token, &1_000, &unlock_time + 200, &10_000)
+        .expect("second deposit");
+
+    let total_event_count = env.events().all().len();
+    assert_eq!(
+        total_event_count - baseline_events,
+        3,
+        "first deposit emits the carbon-neutral milestone once; the second deposit should not re-emit it"
+    );
 }
 
 #[test]
