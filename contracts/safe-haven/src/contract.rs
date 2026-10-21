@@ -17,6 +17,7 @@ use crate::{
     prediction_market_types::{PredictionMarket, MarketOutcome, Bet},
     types::{
         DepositType, MultiTokenVaultEntry, TokenDeposit, VaultEntry, LedgerVaultEntry, Page,
+        STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, InsuranceClaim, ClaimStatus,
         SessionKeyEntry, STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, MEVCommitment, MEVDetection, MEVStatus,
         PriceSample, SustainabilityMetrics, BatchWithdrawalResult, WithdrawalResult,
@@ -3777,6 +3778,14 @@ impl SafeHaven {
         storage::get_emergency_withdrawal_per_ledger(&env, ledger)
     }
 
+    /// Returns the current balance of the staker rewards pool.
+    /// 
+    /// The rewards pool accumulates 70% of penalties from early deposit cancellations.
+    /// Stakers can claim their proportional share based on their registered stake.
+    /// 
+    /// This is a read-only query that does not modify contract state.
+    pub fn get_rewards_pool_total(env: Env) -> i128 {
+        storage::get_rewards_pool(&env)
     pub fn get_circuit_breaker_history(env: Env) -> Vec<CircuitBreakerActivation> {
         storage::get_circuit_breaker_history(&env)
     }

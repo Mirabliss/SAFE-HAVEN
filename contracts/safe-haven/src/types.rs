@@ -105,6 +105,12 @@ pub enum VaultKey {
     RewardsPool,
     /// Rewards claimed by a staker (track cumulative for auditing)
     StakerRewardsClaimed(Address),
+    /// Insurance claim entry (issue #334)
+    InsuranceClaim(u32),
+    /// Counter for insurance claim IDs (issue #334)
+    ClaimCounter,
+    /// Insurance pool balance per token (issue #334)
+    InsurancePool(Address),
     /// Session key entry: maps (delegator, session_key_id) to SessionKeyEntry
     SessionKey(Address, u32),
     /// Session key counter for a delegator (incremented on each create_session_key)
@@ -238,6 +244,25 @@ pub struct StakerEntry {
     pub stake_amount: i128,
 }
 
+/// Status of an insurance claim (for issue #334)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaimStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+/// Insurance claim record (for issue #334)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsuranceClaim {
+    pub claim_id: u32,
+    pub claimant: Address,
+    pub token: Address,
+    pub amount_requested: i128,
+    pub incident_evidence: String,
+    pub status: ClaimStatus,
 /// Sponsorship fund configuration and state
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
