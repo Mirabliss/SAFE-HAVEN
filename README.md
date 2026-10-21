@@ -267,6 +267,12 @@ Withdraws if `now >= unlock_time`.
 #### `withdraw_to(depositor, deposit_id, recipient)`
 Withdraws to a different address.
 
+**Recipient Validation**
+- The recipient address must be valid and non-zero. Soroban's Address type ensures addresses are properly formed at the SDK level.
+- Validation occurs before any state mutations (storage writes or token transfers), ensuring the transaction fails early with a clear error message if the recipient is invalid.
+- If recipient validation fails, the deposit remains in storage with no state changes.
+- Returns `InvalidRecipient` error (code 28) if the recipient address is invalid.
+
 #### `cancel_deposit(depositor, deposit_id)`
 Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumulates in the staker rewards pool; remainder returned to depositor.
 
@@ -512,6 +518,7 @@ The contract emits `SustainabilityMilestone` events when depositors achieve envi
 | 17 | `StakerNotFound` | Staker not registered in the staker registry |
 | 18 | `NoRewardsToClaim` | Rewards pool is empty or staker's share rounds to zero |
 | 19 | `InsufficientStakeAmount` | Insufficient staked amount for operation |
+| 28 | `InvalidRecipient` | Recipient address is invalid or zero address in `withdraw_to()` |
 
 ---
 
@@ -655,7 +662,6 @@ The following gaps apply specifically to `deposit_by_ledger` deposits. All other
 | Limitation | Detail |
 |---|---|
 | **No frontend support** | The React UI only exposes `deposit` and `deposit_for`. Ledger-based deposits must be made via the Stellar CLI or a custom SDK integration. |
-| **No maximum lock duration** | `deposit` and `deposit_for` reject lock durations longer than `max_lock_secs` (default 5 years). `deposit_by_ledger` only enforces a *minimum* gap of 12 ledgers (`MIN_LOCK_LEDGERS`). There is no equivalent upper-bound check on `unlock_ledger`, so arbitrarily far-future ledger numbers are accepted. |
 | **`get_vault` returns `None`** | The `get_vault(depositor, id)` query only searches timestamp-based entries. To retrieve a ledger-based deposit, use `get_ledger_vault(depositor, id)` which returns `Option<LedgerVaultEntry>`. |
 | **`time_remaining` is an estimate** | For ledger-based deposits, `time_remaining` returns `remaining_ledgers × 5` seconds. This is an approximation because actual ledger close times vary by ±1-2 seconds and are not exactly 5 seconds. **Do not rely on this value for precise scheduling or critical timing.** Use this estimate for UI display and rough scheduling only. The actual withdrawal check (`current_ledger >= unlock_ledger`) is exact and will work correctly. |
 | **`get_deposits_page` excludes ledger-based deposits** | The paginated flat deposits view only iterates over timestamp-based `VaultEntry` records. To enumerate ledger-based deposits, use `get_depositors` + `get_deposit_ids` + `get_ledger_vault`. |

@@ -1,6 +1,16 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
 pub const MAX_DEPOSIT_AMOUNT: i128 = 1_000_000_000_000_000;
+/// Re-export of MAX_LOCK_DURATION_SECS for use in tests and public API.
+///
+/// Defined in constants.rs but re-exported here for compatibility with existing
+/// test imports (test code historically imported from types.rs).
+///
+/// **Value**: 157,788,000 seconds = exactly 5 years.
+///
+/// This constant enforces the maximum lock duration across all deposit types
+/// (`deposit`, `deposit_for`, `deposit_by_ledger`, etc.) and is used by
+/// tests to verify boundary conditions at 5 years and 5 years + 1 second.
 pub const MAX_LOCK_DURATION_SECS: u64 = 157_788_000;
 pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 
@@ -72,6 +82,11 @@ pub enum VaultKey {
     /// Persists the schema version written by the last `migrate()` call (or 1
     /// for contracts that were initialized before versioning was introduced).
     StorageVersion,
+    /// Accumulated staker-pool balance for `token`.
+    /// On `cancel_deposit` 70 % of the penalty is added here; on
+    /// `claim_staker_pool` the full balance for that token is transferred to
+    /// the caller and this key is cleared.
+    StakerPool(Address),
     /// Guards flash-loan execution against re-entrant nested calls.
     FlashLoanGuard,
     /// Active borrower state for a single-token flash loan.
@@ -96,6 +111,11 @@ pub enum VaultKey {
     SessionKeyCounter(Address),
     /// Active session key IDs for a delegator (stores Vec<u32>)
     ActiveSessionKeyIds(Address),
+    /// Sustainability timing and totals keyed by depositor.
+    SustainabilityMetrics(Address, u32),
+    TotalCarbonFootprint(Address),
+    TotalCarbonOffset(Address),
+    MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
 }
@@ -140,6 +160,28 @@ pub struct LedgerVaultEntry {
     pub penalty_bps: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityMetrics {
+    pub deposit_id: u32,
+    pub depositor: Address,
+    pub carbon_footprint: i128,
+    pub renewable_energy_percent: u32,
+    pub carbon_offset_grams: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityReport {
+    pub depositor: Address,
+    pub total_carbon_footprint: i128,
+    pub average_renewable_energy_percent: u32,
+    pub total_carbon_offset: i128,
+    pub active_deposit_count: u32,
+    pub report_timestamp: u64,
+}
+
 /// A single token+amount pair used in multi-token deposits (issue #330).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +216,8 @@ pub enum DepositType {
     /// Multi-token timestamp-based deposit (`MultiTokenVaultEntry`). (issue #330)
     MultiToken,
 }
+
+pub const MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER: i128 = 1_000_000;
 
 /// Paginated query result for depositor addresses.
 /// (Soroban `#[contracttype]` does not support generics.)

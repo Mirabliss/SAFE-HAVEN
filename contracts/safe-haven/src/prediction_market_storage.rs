@@ -6,8 +6,8 @@ use soroban_sdk::{Address, Env, Vec};
 
 use crate::prediction_market_types::{
     PredictionMarket, MarketOutcome, Bet, BetKey, MarketConfig, OracleResolution,
-    MAX_LOCK_DURATION_SECS,
 };
+use crate::types::MAX_LOCK_DURATION_SECS;
 
 // Storage key types for prediction markets
 #[derive(Clone)]
@@ -39,6 +39,25 @@ pub const MARKET_BUMP_THRESHOLD: u32 = MARKET_BUMP_TARGET / 2;
 // ================================================================
 //  Market Config Helpers
 // ================================================================
+
+/// Returns `true` if the prediction market subsystem has been initialized.
+pub fn is_pm_initialized(env: &Env) -> bool {
+    let key = soroban_sdk::Symbol::new(env, "pm_init");
+    env.storage()
+        .persistent()
+        .get::<_, bool>(&key)
+        .unwrap_or(false)
+}
+
+/// Marks the prediction market subsystem as initialized. Called exactly once
+/// from `init_prediction_markets`.
+pub fn set_pm_initialized(env: &Env) {
+    let key = soroban_sdk::Symbol::new(env, "pm_init");
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
+}
 
 pub fn get_market_config(env: &Env) -> Option<MarketConfig> {
     let key = soroban_sdk::Symbol::new(env, "pm_cfg");

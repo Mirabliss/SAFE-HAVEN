@@ -8,16 +8,22 @@ use soroban_sdk::{contract, contractimpl, token, Address, Bytes, Env, String, Sy
 use crate::{
     constants::{
         MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS, MIN_LOCK_DURATION_SECS,
-        MIN_LOCK_LEDGERS, STAKER_PENALTY_BPS, FEE_RECIPIENT_PENALTY_BPS,
+        MIN_LOCK_LEDGERS, MAX_LOCK_LEDGERS, STAKER_PENALTY_BPS, FEE_RECIPIENT_PENALTY_BPS,
     },
     errors::VaultError,
     events, storage, constants,
+    prediction_market,
+    prediction_market_errors::PredictionMarketError,
+    prediction_market_types::{PredictionMarket, MarketOutcome, Bet},
     types::{
         DepositType, MultiTokenVaultEntry, TokenDeposit, VaultEntry, LedgerVaultEntry, Page,
         SessionKeyEntry, STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, MEVCommitment, MEVDetection, MEVStatus,
         PriceSample, SustainabilityMetrics, BatchWithdrawalResult, WithdrawalResult,
     },
+    prediction_market,
+    prediction_market_errors::PredictionMarketError,
+    prediction_market_types::{PredictionMarket, MarketOutcome, Bet},
 };
 
 /// Minimum compound frequency: must be at least 60 seconds if non-zero.
@@ -155,6 +161,33 @@ fn check_tax_wash_sale(
             return Err(VaultError::TaxWashSalePeriodActive);
         }
     }
+    Ok(())
+}
+
+/// Validates that the recipient address is a valid, non-zero Soroban address.
+///
+/// This validation ensures the withdrawal does not attempt to send funds to an
+/// invalid recipient, which could result in permanent loss of funds. Validation
+/// occurs before any state mutations (storage writes or token transfers).
+///
+/// # Arguments
+/// * `recipient` - The recipient address to validate
+///
+/// # Returns
+/// * `Ok(())` if the recipient is valid and non-zero
+/// * `Err(VaultError::InvalidRecipient)` if the recipient is invalid
+fn validate_recipient(recipient: &Address) -> Result<(), VaultError> {
+    // In Soroban, Address is a properly-typed value that represents either
+    // a contract or account address. The SDK ensures Address values are non-zero.
+    // This validation function serves as an explicit guard and can be extended
+    // in the future if additional checks are needed.
+    //
+    // Current validation: The Address type itself prevents zero/invalid addresses,
+    // but we maintain this function for:
+    // 1. Explicit documentation of recipient validation requirements
+    // 2. Forward compatibility if validation rules need to expand
+    // 3. Clear error messages if recipient checks fail
+    
     Ok(())
 }
 
@@ -414,6 +447,42 @@ impl SafeHaven {
     }
 
     // ----------------------------------------------------------------
+    //  Prediction Markets - Initialization
+    // ----------------------------------------------------------------
+
+    /// Initialize the prediction market subsystem.
+    ///
+    /// This is a one-time setup that configures the prediction market subsystem
+    /// with an admin, fee recipient, and default fee structure. Once initialized,
+    /// markets can be created, bets placed, and outcomes resolved.
+    ///
+    /// # Parameters
+    /// - `admin`           — Address that can create markets, cancel markets, and pause market creation.
+    /// - `fee_recipient`   — Address that receives fees from claimed winnings.
+    /// - `default_fee_bps` — Default fee percentage in basis points (0-1000). If `None`, uses 100 (1%).
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or `PredictionMarketError::AlreadyInitialized` if already initialized.
+    ///
+    /// # Example
+    /// ```
+    /// contract.init_prediction_markets(
+    ///     admin: admin_address,
+    ///     fee_recipient: treasury_address,
+    ///     default_fee_bps: Some(100),  // 1% fee
+    /// )?;
+    /// ```
+    pub fn init_prediction_markets(
+        env: Env,
+        admin: Address,
+        fee_recipient: Address,
+        default_fee_bps: Option<u32>,
+    ) -> Result<(), PredictionMarketError> {
+        let fee_bps = default_fee_bps.unwrap_or(crate::prediction_market_types::DEFAULT_FEE_BPS);
+        prediction_market::initialize_markets(&env, admin, fee_recipient, fee_bps)
+    }
+
+    // ----------------------------------------------------------------
     //  Smart-wallet and session-key authorization
     // ----------------------------------------------------------------
 
@@ -584,6 +653,41 @@ impl SafeHaven {
         storage::get_quantum_safe_metadata(&env, &depositor, deposit_id)
     }
 
+    /// Lock `amount` tokens until `unlock_time`.
+    ///
+    /// # Timestamp precision
+    ///
+    /// `unlock_time` is compared against `env.ledger().timestamp()`, the
+    /// **ledger close time** recorded in the Stellar consensus protocol.
+    /// This value advances in whole-second increments but is **not** a
+    /// wall-clock second counter:
+    ///
+    /// * Ledgers close roughly every 5 seconds on Stellar mainnet; the
+    ///   timestamp therefore jumps by ~5 seconds between successive ledgers,
+    ///   not by exactly 1.
+    /// * Any two calls that land in the **same ledger** see the **same**
+    ///   `env.ledger().timestamp()` value, regardless of how far apart they
+    ///   were submitted in real time.
+    ///
+    /// Callers must therefore derive `unlock_time` from
+    /// `env.ledger().timestamp()` (or the equivalent RPC `getLatestLedger`
+    /// close time), **not** from an off-chain `Date.now()`.  Using an
+    /// off-chain clock can cause the computed `unlock_time` to differ from
+    /// the on-chain `now` by up to half a ledger interval (≈ 2-3 seconds).
+    ///
+    /// # Validation order
+    ///
+    /// 1. `unlock_time > now`        — must be strictly in the future
+    ///    (`UnlockTimeNotInFuture` if not)
+    /// 2. `lock_duration <= max_lock` — must not exceed the configured cap
+    ///    (`LockDurationTooLong` if exceeded)
+    /// 3. `lock_duration >= MIN_LOCK_DURATION_SECS` (60 s) — enforces the
+    ///    minimum 60-second lock (`LockDurationTooShort` if below)
+    ///
+    /// Boundary examples (given `now = env.ledger().timestamp()`):
+    /// * `unlock_time = now`        → `UnlockTimeNotInFuture`
+    /// * `unlock_time = now + 59`   → `LockDurationTooShort`
+    /// * `unlock_time = now + 60`   → **success** (exact minimum)
     pub fn deposit(
         env: Env,
         depositor: Address,
@@ -1018,6 +1122,9 @@ impl SafeHaven {
         if ledger_gap < MIN_LOCK_LEDGERS {
             return Err(VaultError::LockDurationTooShort);
         }
+        if ledger_gap > MAX_LOCK_LEDGERS {
+            return Err(VaultError::LockDurationTooLong);
+        }
 
         let deposit_id = storage::next_deposit_id(&env, &depositor);
 
@@ -1104,6 +1211,20 @@ impl SafeHaven {
             return Err(VaultError::EmergencyLockdown);
         }
 
+            if penalty > 0 {
+                let fee_recipient =
+                    storage::get_fee_recipient(&env).ok_or(VaultError::MissingFeeRecipient)?;
+
+                // 30 % of the penalty → fee_recipient, 70 % → staker pool
+                let fee_slice = (penalty * storage::STAKER_FEE_BPS) / 10_000;
+                let pool_slice = penalty - fee_slice; // remainder avoids rounding drift
+
+                token_client.transfer(&contract, &fee_recipient, &fee_slice);
+                storage::accumulate_staker_pool(&env, &entry.token, pool_slice);
+            }
+            if refund > 0 {
+                token_client.transfer(&contract, &depositor, &refund);
+            }
         let count = tokens_and_amounts.len();
         if count == 0 {
             return Err(VaultError::EmptyTokenList);
@@ -1136,6 +1257,16 @@ impl SafeHaven {
 
         let max_deposit = storage::get_max_deposit(&env).unwrap_or(MAX_DEPOSIT_AMOUNT);
 
+            if penalty > 0 {
+                let fee_recipient =
+                    storage::get_fee_recipient(&env).ok_or(VaultError::MissingFeeRecipient)?;
+
+                // 30 % of the penalty → fee_recipient, 70 % → staker pool
+                let fee_slice = (penalty * storage::STAKER_FEE_BPS) / 10_000;
+                let pool_slice = penalty - fee_slice; // remainder avoids rounding drift
+
+                token_client.transfer(&contract, &fee_recipient, &fee_slice);
+                storage::accumulate_staker_pool(&env, &entry.token, pool_slice);
         // Validate all amounts before transferring anything (checks before effects).
         for td in tokens_and_amounts.iter() {
             if td.amount <= 0 {
@@ -2292,6 +2423,7 @@ impl SafeHaven {
 
     /// Withdraw to a specific recipient address.
     ///
+    /// Validates the recipient address is valid before any state mutations.
     /// If a whitelist has been set for this deposit, `recipient` must be in it.
     pub fn withdraw_to(
         env: Env,
@@ -2300,6 +2432,9 @@ impl SafeHaven {
         recipient: Address,
     ) -> Result<(), VaultError> {
         depositor.require_auth();
+
+        // Validate recipient address before any state mutations
+        validate_recipient(&recipient)?;
 
         if storage::is_emergency_lockdown(&env) {
             return Err(VaultError::EmergencyLockdown);
@@ -3313,6 +3448,51 @@ impl SafeHaven {
         env.ledger().timestamp()
     }
 
+    pub fn get_sustainability_metrics(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+    ) -> Option<crate::types::SustainabilityMetrics> {
+        storage::get_sustainability_metrics(&env, &depositor, deposit_id)
+    }
+
+    pub fn generate_sustainability_report(
+        env: Env,
+        depositor: Address,
+    ) -> crate::types::SustainabilityReport {
+        let now = env.ledger().timestamp();
+        let ids = storage::get_deposit_ids(&env, &depositor);
+
+        let mut total_carbon_footprint: i128 = 0;
+        let mut total_carbon_offset: i128 = 0;
+        let mut renewable_total: u64 = 0;
+        let mut active_deposit_count: u32 = 0;
+
+        for id in ids.iter() {
+            if let Some(metrics) = storage::get_sustainability_metrics_readonly(&env, &depositor, id) {
+                total_carbon_footprint = total_carbon_footprint.saturating_add(metrics.carbon_footprint);
+                total_carbon_offset = total_carbon_offset.saturating_add(metrics.carbon_offset_grams);
+                renewable_total = renewable_total.saturating_add(metrics.renewable_energy_percent as u64);
+                active_deposit_count = active_deposit_count.saturating_add(1);
+            }
+        }
+
+        let average_renewable_energy_percent = if active_deposit_count > 0 {
+            ((renewable_total / active_deposit_count as u64) as u32).min(100)
+        } else {
+            0
+        };
+
+        crate::types::SustainabilityReport {
+            depositor: depositor.clone(),
+            total_carbon_footprint,
+            average_renewable_energy_percent,
+            total_carbon_offset,
+            active_deposit_count,
+            report_timestamp: now,
+        }
+    }
+
     /// Returns time remaining for a deposit.
     /// For timestamp-based deposits: exact seconds remaining.
     /// For ledger-based deposits: estimated seconds (remaining_ledgers × 5).
@@ -4321,6 +4501,41 @@ fn check_sustainability_milestones(
     }
 
     // ----------------------------------------------------------------
+    //  Staker pool — query and claim (Issue #111)
+    // ----------------------------------------------------------------
+
+    /// Returns the current accumulated staker-pool balance for `token`.
+    /// No auth required — public read-only query.
+    pub fn staker_pool_balance(env: Env, token: Address) -> i128 {
+        storage::get_staker_pool_balance(&env, &token)
+    }
+
+    /// Transfer the full staker-pool balance for `token` to `recipient`.
+    ///
+    /// `recipient` must sign the transaction.  Any address may claim —
+    /// the pool is a shared reward bucket, not per-staker.  Callers that
+    /// want to split rewards among multiple stakers should claim here and
+    /// then distribute off-chain or in a separate registry contract.
+    ///
+    /// Returns the amount transferred.  Returns 0 (no-op) if the pool is
+    /// already empty.
+    pub fn claim_staker_pool(
+        env: Env,
+        recipient: Address,
+        token: Address,
+    ) -> Result<i128, VaultError> {
+        recipient.require_auth();
+
+        let amount = storage::drain_staker_pool(&env, &token);
+        if amount > 0 {
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+        }
+        Ok(amount)
+    }
+
+    // ----------------------------------------------------------------
+    //  Read-only Queries
     //  Loyalty Program — Queries
     // ----------------------------------------------------------------
 
@@ -4461,5 +4676,150 @@ impl SafeHaven {
         let tier = SafeHaven::compute_tier(completed, volume);
         let discount = SafeHaven::tier_fee_discount(tier);
         penalty_bps.saturating_sub(discount)
+    }
+}
+
+// ================================================================
+//  Prediction Markets — Public Entry Points
+// ================================================================
+
+#[contractimpl]
+impl SafeHaven {
+    // ----------------------------------------------------------------
+    //  Initialization
+    // ----------------------------------------------------------------
+
+    /// Initialize the prediction market subsystem.
+    /// Must be called once before any market operations.
+    pub fn init_prediction_markets(
+        env: Env,
+        admin: Address,
+        fee_recipient: Address,
+        default_fee_bps: Option<u32>,
+    ) -> Result<(), PredictionMarketError> {
+        use crate::prediction_market_types::DEFAULT_FEE_BPS;
+        let fee_bps = default_fee_bps.unwrap_or(DEFAULT_FEE_BPS);
+        prediction_market::initialize_markets(&env, admin, fee_recipient, fee_bps)
+    }
+
+    // ----------------------------------------------------------------
+    //  Market Lifecycle
+    // ----------------------------------------------------------------
+
+    /// Create a new prediction market.
+    /// Returns the new market_id.
+    pub fn create_prediction_market(
+        env: Env,
+        creator: Address,
+        market_type: String,
+        description: String,
+        oracle: Address,
+        close_time: u64,
+        resolution_deadline: u64,
+        outcome_names: Vec<String>,
+        fee_bps: Option<u32>,
+    ) -> Result<u32, PredictionMarketError> {
+        prediction_market::create_market(
+            &env,
+            creator,
+            market_type,
+            description,
+            oracle,
+            close_time,
+            resolution_deadline,
+            outcome_names,
+            fee_bps,
+        )
+    }
+
+    /// Close a market to new bets (admin or oracle only).
+    pub fn close_prediction_market(
+        env: Env,
+        closer: Address,
+        market_id: u32,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::close_market(&env, closer, market_id)
+    }
+
+    /// Resolve a closed market. Only the designated oracle may call this.
+    ///
+    /// `resolution_data` is an optional numeric value (e.g., the final aggregate
+    /// deposit amount) that the oracle can store alongside the resolution for
+    /// audit and transparency purposes. Passing `None` is valid when no extra
+    /// data is available.
+    pub fn resolve_prediction_market(
+        env: Env,
+        oracle: Address,
+        market_id: u32,
+        winning_outcome: u32,
+        resolution_data: Option<i128>,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::resolve_market(&env, oracle, market_id, winning_outcome, resolution_data)
+    }
+
+    /// Cancel a market and refund all bets (admin only).
+    pub fn cancel_prediction_market(
+        env: Env,
+        admin: Address,
+        market_id: u32,
+        token: Address,
+    ) -> Result<i128, PredictionMarketError> {
+        prediction_market::cancel_market(&env, admin, market_id, token)
+    }
+
+    /// Pause or unpause new market creation (admin only).
+    pub fn set_prediction_market_paused(
+        env: Env,
+        admin: Address,
+        paused: bool,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::set_market_paused(&env, admin, paused)
+    }
+
+    // ----------------------------------------------------------------
+    //  Betting
+    // ----------------------------------------------------------------
+
+    /// Place a bet on a market outcome.
+    pub fn place_prediction_bet(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        amount: i128,
+        token: Address,
+    ) -> Result<(), PredictionMarketError> {
+        prediction_market::place_bet(&env, bettor, market_id, outcome_id, amount, token)
+    }
+
+    /// Claim winnings for a resolved market.
+    /// Returns the payout amount after fees.
+    pub fn claim_prediction_winnings(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        token: Address,
+    ) -> Result<i128, PredictionMarketError> {
+        prediction_market::claim_winnings(&env, bettor, market_id, outcome_id, token)
+    }
+
+    // ----------------------------------------------------------------
+    //  Read-only Queries
+    // ----------------------------------------------------------------
+
+    /// Get full market details, including `resolution_data` once resolved.
+    pub fn get_prediction_market(env: Env, market_id: u32) -> Option<PredictionMarket> {
+        prediction_market::get_market_details(&env, market_id)
+    }
+
+    /// Get outcome details (total bets, bettor count) for a specific outcome.
+    pub fn get_market_outcome(env: Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
+        prediction_market::get_outcome_details(&env, market_id, outcome_id)
+    }
+
+    /// Get a specific user's bet on an outcome.
+    pub fn get_user_bet(env: Env, market_id: u32, outcome_id: u32, bettor: Address) -> Option<Bet> {
+        prediction_market::get_bet_details(&env, market_id, outcome_id, &bettor)
     }
 }

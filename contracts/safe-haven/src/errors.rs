@@ -37,6 +37,8 @@ pub enum VaultError {
     SessionKeyExpired = 22,
     /// Session key exceeds maximum deposit amount
     SessionKeyInsufficientLimit = 23,
+    /// Emergency withdrawal would exceed the per-ledger hard cap.
+    EmergencyWithdrawalLimitExceeded = 20,
     /// Sponsorship fund not initialized
     SponsorshipNotInitialized = 20,
     /// User not eligible for sponsorship
@@ -53,4 +55,6 @@ pub enum VaultError {
     InvalidSponsorshipConfig = 26,
     /// Batch size exceeds MAX_BATCH_SIZE
     BatchSizeExceeded = 27,
+    /// Recipient address is invalid (zero address)
+    InvalidRecipient = 28,
 }
