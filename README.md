@@ -1105,3 +1105,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [CHANGELOG.md](./CHANGELOG.md).
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-899 -->
+- #899: Issue #8: Withdraw - Recipient Address Validation
+
+<!-- handsoff-issue-901 -->
+- #901: Issue #10: Deposit Retrieval - get_vault Query Consistency
+
+<!-- handsoff-issue-902 -->
+- #902: Issue #11: Withdrawal Fee Calculation Accuracy
