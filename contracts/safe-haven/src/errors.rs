@@ -31,4 +31,22 @@ pub enum VaultError {
     InvalidCompoundFrequency = 19,
     /// Emergency withdrawal would exceed the per-ledger hard cap.
     EmergencyWithdrawalLimitExceeded = 20,
+    /// Sponsorship fund not initialized
+    SponsorshipNotInitialized = 20,
+    /// User not eligible for sponsorship
+    NotEligibleForSponsorship = 21,
+    /// Sponsorship fund insufficient
+    InsufficientSponsorshipFund = 22,
+    /// User exceeded daily sponsorship limit
+    SponsorshipDailyLimitExceeded = 23,
+    /// User transaction cooldown still active
+    SponsorshipCooldownActive = 24,
+    /// Potential sybil attack detected
+    PotentialSybilAttack = 25,
+    /// Sponsorship configuration error
+    InvalidSponsorshipConfig = 26,
+    /// Batch size exceeds MAX_BATCH_SIZE
+    BatchSizeExceeded = 27,
+    /// Recipient address is invalid (zero address)
+    InvalidRecipient = 28,
 }

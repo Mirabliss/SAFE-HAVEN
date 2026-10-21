@@ -202,83 +202,84 @@ export function Dashboard({ contractInfo }: DashboardProps) {
 
       {/* Main content */}
       <div className="space-y-4 md:space-y-6">
-      {/* Stats row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
-        {loading && deposits.length === 0 ? (
-          // Loading skeleton for stats
-          <>
-            <StatCardSkeleton />
-            <StatCardSkeleton />
-            <StatCardSkeleton />
-            <StatCardSkeleton />
-          </>
-        ) : (
-          <>
-            <StatCard label="Your Deposits" value={String(deposits.length)} />
-            <StatCard label="Unlocked" value={String(deposits.filter(d => d.timeRemaining === 0 && d.unlockVerified).length)} accent="green" />
-            <StatCard label="Locked" value={String(deposits.filter(d => d.timeRemaining === null || d.timeRemaining > 0 || !d.unlockVerified).length)} accent="yellow" />
-            <StatCard label="Total Depositors" value={contractInfo.depositorCount > 0 ? String(contractInfo.depositorCount) : '–'} />
-          </>
-        )}
-      </div>
-
-      {/* Tx status */}
-      <TxStatusBadge status={txStatus} txHash={txHash} error={txError} />
-
-      {/* Deposits */}
-      <div>
-        <div className="flex items-center justify-between mb-3 md:mb-4 gap-2">
-          <h2 className="font-semibold text-lg">Your Vaults</h2>
-          <button onClick={refresh} className="btn-secondary text-xs px-3 py-1.5 h-10 md:h-auto" disabled={loading}>
-            {loading ? (
-              <span className="w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />
-            ) : (
-              <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
-                <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
-              </svg>
-            )}
-            <span className="hidden sm:inline">Refresh</span>
-          </button>
+        {/* Stats row */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
+          {loading && deposits.length === 0 ? (
+            // Loading skeleton for stats
+            <>
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+              <StatCardSkeleton />
+            </>
+          ) : (
+            <>
+              <StatCard label="Your Deposits" value={String(deposits.length)} />
+              <StatCard label="Unlocked" value={String(deposits.filter(d => d.timeRemaining === 0 && d.unlockVerified).length)} accent="green" />
+              <StatCard label="Locked" value={String(deposits.filter(d => d.timeRemaining === null || d.timeRemaining > 0 || !d.unlockVerified).length)} accent="yellow" />
+              <StatCard label="Total Depositors" value={contractInfo.depositorCount > 0 ? String(contractInfo.depositorCount) : '–'} />
+            </>
+          )}
         </div>
 
-        {loading && deposits.length === 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
-            {[1, 2].map((i) => (
-              <div key={i} className="card p-4 md:p-5 h-32 animate-pulse">
-                <div className="flex gap-2 md:gap-3">
-                  <div className="w-8 h-8 md:w-10 md:h-10 rounded-full bg-slate-700/60" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-3 md:h-4 bg-slate-700/60 rounded w-1/2" />
-                    <div className="h-2 md:h-3 bg-slate-700/40 rounded w-1/3" />
+        {/* Tx status */}
+        <TxStatusBadge status={txStatus} txHash={txHash} error={txError} />
+
+        {/* Deposits */}
+        <div>
+          <div className="flex items-center justify-between mb-3 md:mb-4 gap-2">
+            <h2 className="font-semibold text-lg">Your Vaults</h2>
+            <button onClick={refresh} className="btn-secondary text-xs px-3 py-1.5 h-10 md:h-auto" disabled={loading}>
+              {loading ? (
+                <span className="w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+              ) : (
+                <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                  <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                </svg>
+              )}
+              <span className="hidden sm:inline">Refresh</span>
+            </button>
+          </div>
+
+          {loading && deposits.length === 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+              {[1, 2].map((i) => (
+                <div key={i} className="card p-4 md:p-5 h-32 animate-pulse">
+                  <div className="flex gap-2 md:gap-3">
+                    <div className="w-8 h-8 md:w-10 md:h-10 rounded-full bg-slate-700/60" />
+                    <div className="flex-1 space-y-2">
+                      <div className="h-3 md:h-4 bg-slate-700/60 rounded w-1/2" />
+                      <div className="h-2 md:h-3 bg-slate-700/40 rounded w-1/3" />
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        ) : error ? (
-          <div className="card p-4 md:p-6 text-center text-red-400 text-sm">
-            <p className="font-medium">Failed to load deposits</p>
-            <p className="text-xs text-slate-500 mt-1">{error}</p>
-          </div>
-        ) : deposits.length === 0 ? (
-          <div className="card p-6 md:p-10 text-center">
-            <p className="text-slate-400 text-sm md:text-base">No active vaults for</p>
-            {wallet && <p className="font-mono text-xs text-stellar-400 mt-1">{shortAddr(wallet.address)}</p>}
-            <p className="text-slate-500 text-xs md:text-sm mt-3">Use the Deposit tab to lock your first tokens.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
-            {deposits.map((d) => (
-              <DepositCard
-                key={d.depositId}
-                deposit={d}
-                onWithdraw={handleWithdraw}
-                onCancel={handleCancel}
-                txPending={pendingId === d.depositId}
-              />
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          ) : error ? (
+            <div className="card p-4 md:p-6 text-center text-red-400 text-sm">
+              <p className="font-medium">Failed to load deposits</p>
+              <p className="text-xs text-slate-500 mt-1">{error}</p>
+            </div>
+          ) : deposits.length === 0 ? (
+            <div className="card p-6 md:p-10 text-center">
+              <p className="text-slate-400 text-sm md:text-base">No active vaults for</p>
+              {wallet && <p className="font-mono text-xs text-stellar-400 mt-1">{shortAddr(wallet.address)}</p>}
+              <p className="text-slate-500 text-xs md:text-sm mt-3">Use the Deposit tab to lock your first tokens.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+              {deposits.map((d) => (
+                <DepositCard
+                  key={d.depositId}
+                  deposit={d}
+                  onWithdraw={handleWithdraw}
+                  onCancel={handleCancel}
+                  txPending={pendingId === d.depositId}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </>
   )

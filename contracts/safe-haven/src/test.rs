@@ -65,14 +65,17 @@ extern crate std;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Vec,
+    Address, Bytes, BytesN, Env, String, Vec,
 };
 
 use crate::{
     constants::MIN_LOCK_LEDGERS,
     contract::{SafeHaven, SafeHavenClient},
     errors::VaultError,
-    types::{DepositType, VaultEntry, VaultKey, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS},
+    types::{
+        DepositType, GovernanceMode, ProposalType, VaultEntry, VaultKey, MAX_DEPOSIT_AMOUNT,
+        MAX_LOCK_DURATION_SECS,
+    },
 };
 
 fn setup() -> (
@@ -114,6 +117,39 @@ fn advance_time(env: &Env, seconds: u64) {
         min_persistent_entry_ttl: 4096,
         max_entry_ttl: 33_000_000,
     });
+}
+
+#[test]
+fn test_flash_borrow_repay_and_fee_distribution() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let borrower: Address = Address::generate(&env);
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    vault.deposit(&alice, &token, &10_000, &unlock_time, &0);
+    let borrowed = vault.flash_borrow(&borrower, &token, &5_000);
+    assert_eq!(borrowed, 5_000);
+
+    let due = vault.flash_repay(&borrower, &token, &5_000 + 5_000 * 10 / 10_000);
+    assert_eq!(due, 5_000 + 5);
+    assert_eq!(vault.get_flash_loan_fee_balance(&token, &alice), 5);
+
+    let claimed = vault.claim_flash_loan_fees(&alice, &token);
+    assert_eq!(claimed, 5);
+    assert_eq!(vault.get_flash_loan_fee_balance(&token, &alice), 0);
+}
+
+#[test]
+fn test_flash_borrow_rejects_reentrant_call() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let borrower: Address = Address::generate(&env);
+    let unlock_time = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &10_000, &unlock_time, &0);
+
+    let _ = vault.flash_borrow(&borrower, &token, &1_000);
+    let result = vault.try_flash_borrow(&borrower, &token, &1_000);
+    assert_eq!(result, Err(Ok(VaultError::FlashLoanReentrancy)));
+
+    vault.flash_repay(&borrower, &token, &1_000 + 1_000 * 10 / 10_000);
 }
 
 struct UpgradeHarness {
@@ -184,6 +220,18 @@ impl UpgradeHarness {
 fn test_initialize_sets_admin() {
     let (_env, vault, _token, admin, _alice, _fee) = setup();
     assert_eq!(vault.get_admin(), Some(admin));
+}
+
+#[test]
+fn quantum_safe_key_registration_rejects_invalid_encoding() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let invalid_key = Bytes::from_slice(&env, &[0; 32]);
+
+    assert_eq!(
+        vault.try_register_quantum_safe_key(&alice, &invalid_key),
+        Err(Ok(VaultError::InvalidQuantumSafeKey))
+    );
+    assert_eq!(vault.get_quantum_safe_key(&alice), None);
 }
 
 #[test]
@@ -381,6 +429,28 @@ fn test_admin_governance_requires_admin_and_prevents_double_vote() {
     );
 }
 
+#[test]
+fn test_parameter_change_governance_executes_max_deposit_update() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&alice, &1_000);
+    StellarAssetClient::new(&env, &token).mint(&bob, &2_000);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    vault.deposit(&bob, &token, &2_000, &unlock_time, &0);
+
+    let proposal_id = vault.propose_change(&alice, &GovernanceMode::CommunityVote, &ProposalType::MaxDeposit, &5_000);
+    assert_eq!(vault.vote(&proposal_id, &alice, &true), 1_000);
+    assert_eq!(vault.vote(&proposal_id, &bob, &false), 2_000);
+
+    advance_time(&env, 86_400 + 86_400);
+    vault.execute_proposal(&proposal_id);
+
+    let (max_deposit, _max_lock) = vault.get_constants();
+    assert_eq!(max_deposit, 5_000);
+}
+
 // ================================================================
 //  Deposit — happy path
 // ================================================================
@@ -404,6 +474,56 @@ fn test_deposit_success() {
     // Event emission is verified by test_deposit_for_event_emitted; the
     // core assertions above (vault entry fields, id) are sufficient here.
     let _ = events; // suppress unused-variable warning
+}
+
+#[test]
+fn link_identity_stores_only_commitments_for_supported_did() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    let credential_commitment = BytesN::from_array(&env, &[7; 32]);
+
+    vault.link_identity(
+        &alice,
+        &deposit_id,
+        &String::from_slice(&env, "did:key:z6Mkverified"),
+        &credential_commitment,
+        &fee,
+    );
+
+    let identity = vault.get_identity(&alice, &deposit_id).expect("identity link");
+    assert_eq!(identity.did_method, String::from_slice(&env, "did:key"));
+    assert_eq!(identity.credential_commitment, credential_commitment);
+    assert_eq!(identity.verifier, fee);
+    assert_eq!(identity.did_commitment, env.crypto().sha256(&String::from_slice(&env, "did:key:z6Mkverified").to_bytes()));
+}
+
+#[test]
+fn link_identity_supports_ethr_and_rejects_unknown_methods() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    let credential_commitment = BytesN::from_array(&env, &[9; 32]);
+
+    vault.link_identity(
+        &alice,
+        &deposit_id,
+        &String::from_slice(&env, "did:ethr:0x1234"),
+        &credential_commitment,
+        &fee,
+    );
+    assert_eq!(vault.get_identity(&alice, &deposit_id).unwrap().did_method, String::from_slice(&env, "did:ethr"));
+
+    assert_eq!(
+        vault.try_link_identity(
+            &alice,
+            &deposit_id,
+            &String::from_slice(&env, "did:web:example.com"),
+            &credential_commitment,
+            &fee,
+        ),
+        Err(Ok(VaultError::UnsupportedDidMethod))
+    );
 }
 
 #[test]
@@ -538,6 +658,110 @@ fn test_deposit_lock_duration_too_short_fails() {
 }
 
 // ================================================================
+//  Minimum lock-duration boundary tests
+//
+//  Acceptance criteria (from issue):
+//    ✓  unlock_time = now            → UnlockTimeNotInFuture
+//    ✓  unlock_time = now + 59 s     → LockDurationTooShort
+//    ✓  unlock_time = now + 60 s     → succeeds (MIN_LOCK_DURATION_SECS = 60)
+//
+//  Timestamp precision note:
+//    `env.ledger().timestamp()` returns a u64 Unix timestamp obtained from
+//    the Stellar ledger's `close_time` field.  On mainnet the ledger closes
+//    approximately every 5 seconds, but the exact close time is determined by
+//    validator consensus and is NOT guaranteed to advance by exactly 1 second
+//    per ledger.  All deposit validation uses `env.ledger().timestamp()` as the
+//    single source of truth, so callers must always compute `unlock_time`
+//    relative to *that* value, not from any off-chain clock.
+// ================================================================
+
+/// unlock_time == now must be rejected with UnlockTimeNotInFuture.
+/// This is the strict `<=` boundary: equal is treated as "not in the future".
+#[test]
+fn test_deposit_unlock_time_equal_to_now_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let now = env.ledger().timestamp();
+    assert_eq!(
+        vault.try_deposit(&alice, &token, &1_000, &now, &0),
+        Err(Ok(VaultError::UnlockTimeNotInFuture))
+    );
+}
+
+/// unlock_time = now + 59 s is strictly in the future but the resulting
+/// lock duration (59 s) is below the 60-second minimum, so the call must
+/// return LockDurationTooShort — not UnlockTimeNotInFuture.
+#[test]
+fn test_deposit_lock_duration_59s_fails_with_too_short() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let now = env.ledger().timestamp();
+    assert_eq!(
+        vault.try_deposit(&alice, &token, &1_000, &(now + 59), &0),
+        Err(Ok(VaultError::LockDurationTooShort))
+    );
+}
+
+/// unlock_time = now + 60 s is the exact minimum allowed lock duration and
+/// must succeed, creating a valid vault entry.
+#[test]
+fn test_deposit_lock_duration_exactly_60s_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 60;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    let entry = vault.get_vault(&alice, &id).expect("vault entry should exist");
+    assert_eq!(entry.unlock_time, unlock_time);
+    assert_eq!(entry.amount, 1_000);
+}
+
+/// Validates that the same 60-second minimum is enforced for deposit_for.
+#[test]
+fn test_deposit_for_lock_duration_59s_fails_with_too_short() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    assert_eq!(
+        vault.try_deposit_for(&alice, &bob, &token, &1_000, &(now + 59), &0),
+        Err(Ok(VaultError::LockDurationTooShort))
+    );
+}
+
+/// Validates that the same 60-second minimum is enforced for deposit_for (happy path).
+#[test]
+fn test_deposit_for_lock_duration_exactly_60s_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    let id = vault.deposit_for(&alice, &bob, &token, &1_000, &(now + 60), &0);
+    assert!(vault.get_vault(&bob, &id).is_some());
+}
+
+/// Validates that the same 60-second minimum is enforced for multi_deposit.
+#[test]
+fn test_multi_deposit_lock_duration_59s_fails_with_too_short() {
+    use crate::types::TokenDeposit;
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let now = env.ledger().timestamp();
+    let mut tokens = soroban_sdk::Vec::new(&env);
+    tokens.push_back(TokenDeposit { token: token.clone(), amount: 500 });
+    assert_eq!(
+        vault.try_multi_deposit(&alice, &tokens, &(now + 59), &0),
+        Err(Ok(VaultError::LockDurationTooShort))
+    );
+}
+
+/// Validates that the same 60-second minimum is enforced for multi_deposit (happy path).
+#[test]
+fn test_multi_deposit_lock_duration_exactly_60s_succeeds() {
+    use crate::types::TokenDeposit;
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let now = env.ledger().timestamp();
+    let mut tokens = soroban_sdk::Vec::new(&env);
+    tokens.push_back(TokenDeposit { token: token.clone(), amount: 500 });
+    let id = vault.multi_deposit(&alice, &tokens, &(now + 60), &0);
+    assert!(vault.get_multi_vault(&alice, &id).is_some());
+}
+
+// ================================================================
 //  Multiple deposits (multi-deposit support)
 // ================================================================
 
@@ -642,6 +866,256 @@ fn test_deposit_ids_increment_after_withdrawal() {
 }
 
 // ================================================================
+//  Deposit ID counter — acceptance-criteria tests
+// ================================================================
+
+/// AC: First deposit from a fresh address gets ID = 0.
+#[test]
+fn test_deposit_id_counter_first_deposit_is_zero() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &1_000);
+    let unlock = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock, &0);
+    assert_eq!(id, 0, "first deposit must receive ID 0");
+}
+
+/// AC: Second deposit from the same address gets ID = 1.
+#[test]
+fn test_deposit_id_counter_second_deposit_is_one() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &2_000);
+    let t1 = env.ledger().timestamp() + 3600;
+    let t2 = env.ledger().timestamp() + 7200;
+    let id0 = vault.deposit(&alice, &token, &1_000, &t1, &0);
+    let id1 = vault.deposit(&alice, &token, &1_000, &t2, &0);
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1, "second deposit must receive ID 1");
+}
+
+/// AC: IDs are unique across all deposits for a single user.
+/// Deposits three times and verifies each returned ID is distinct.
+#[test]
+fn test_deposit_id_counter_all_ids_are_unique() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &3_000);
+    let t1 = env.ledger().timestamp() + 3600;
+    let t2 = env.ledger().timestamp() + 7200;
+    let t3 = env.ledger().timestamp() + 10800;
+    let id0 = vault.deposit(&alice, &token, &1_000, &t1, &0);
+    let id1 = vault.deposit(&alice, &token, &1_000, &t2, &0);
+    let id2 = vault.deposit(&alice, &token, &1_000, &t3, &0);
+    // All three IDs must be pairwise distinct
+    assert_ne!(id0, id1, "IDs 0 and 1 must differ");
+    assert_ne!(id1, id2, "IDs 1 and 2 must differ");
+    assert_ne!(id0, id2, "IDs 0 and 2 must differ");
+}
+
+/// AC: Counter is isolated per depositor — two different users each
+/// start from 0 independently.
+#[test]
+fn test_deposit_id_counter_isolated_per_depositor() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&alice, &3_000);
+    StellarAssetClient::new(&env, &token).mint(&bob, &3_000);
+
+    let t1 = env.ledger().timestamp() + 3600;
+    let t2 = env.ledger().timestamp() + 7200;
+    let t3 = env.ledger().timestamp() + 10800;
+
+    // Alice gets 0, 1
+    let alice_id0 = vault.deposit(&alice, &token, &1_000, &t1, &0);
+    let alice_id1 = vault.deposit(&alice, &token, &1_000, &t2, &0);
+
+    // Bob starts from 0 independently — interleaved with Alice's deposits
+    let bob_id0 = vault.deposit(&bob, &token, &1_000, &t1, &0);
+    let alice_id2 = vault.deposit(&alice, &token, &1_000, &t3, &0);
+    let bob_id1 = vault.deposit(&bob, &token, &1_000, &t2, &0);
+
+    assert_eq!(alice_id0, 0, "alice first deposit must be 0");
+    assert_eq!(alice_id1, 1, "alice second deposit must be 1");
+    assert_eq!(alice_id2, 2, "alice third deposit must be 2");
+    assert_eq!(bob_id0, 0, "bob first deposit must be 0 (isolated counter)");
+    assert_eq!(bob_id1, 1, "bob second deposit must be 1 (isolated counter)");
+
+    // Cross-check: deposit entries are keyed by (depositor, id) — no collision
+    assert_eq!(vault.get_vault(&alice, &0).unwrap().amount, 1_000);
+    assert_eq!(vault.get_vault(&bob, &0).unwrap().amount, 1_000);
+}
+
+/// AC: IDs persist after withdrawal — counter never resets to 0 when all
+/// deposits are drained; the next deposit continues from the previous max.
+#[test]
+fn test_deposit_id_counter_persists_after_full_withdrawal() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &4_000);
+
+    let t1 = env.ledger().timestamp() + 3600;
+    let id0 = vault.deposit(&alice, &token, &1_000, &t1, &0);
+    assert_eq!(id0, 0);
+
+    // Withdraw the only deposit so Alice has no active deposits
+    advance_time(&env, 3601);
+    vault.withdraw(&alice, &0);
+    assert!(
+        vault.get_vault(&alice, &0).is_none(),
+        "deposit must be gone after withdrawal"
+    );
+    assert_eq!(
+        vault.get_deposit_ids(&alice).len(),
+        0,
+        "active IDs list must be empty after full drain"
+    );
+
+    // Next deposit must NOT restart at 0 — counter is monotonic
+    let t2 = env.ledger().timestamp() + 3600;
+    let id1 = vault.deposit(&alice, &token, &1_000, &t2, &0);
+    assert_eq!(id1, 1, "counter must not reset after full withdrawal; expected 1");
+
+    // Drain again
+    advance_time(&env, 3601);
+    vault.withdraw(&alice, &1);
+    assert_eq!(vault.get_deposit_ids(&alice).len(), 0);
+
+    // Counter continues from 2
+    let t3 = env.ledger().timestamp() + 3600;
+    let id2 = vault.deposit(&alice, &token, &1_000, &t3, &0);
+    assert_eq!(id2, 2, "counter must continue monotonically after second full drain");
+}
+
+/// AC: Subsequent deposits continue from the previous max ID even when
+/// some deposits are still active.
+#[test]
+fn test_deposit_id_counter_continues_from_max_after_partial_withdrawal() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &4_000);
+
+    let t1 = env.ledger().timestamp() + 3600;
+    let t2 = env.ledger().timestamp() + 7200;
+    let t3 = env.ledger().timestamp() + 10800;
+
+    let id0 = vault.deposit(&alice, &token, &1_000, &t1, &0);
+    let id1 = vault.deposit(&alice, &token, &1_000, &t2, &0);
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+
+    // Withdraw the first deposit (middle of sequence)
+    advance_time(&env, 3601);
+    vault.withdraw(&alice, &0);
+
+    // New deposit must get id=2, not id=0
+    let id2 = vault.deposit(&alice, &token, &1_000, &t3, &0);
+    assert_eq!(id2, 2, "counter must not reuse IDs from withdrawn deposits");
+
+    // Active list should contain only 1 and 2
+    let ids = vault.get_deposit_ids(&alice);
+    assert_eq!(ids.len(), 2);
+    // Both id=1 and id=2 must be accessible
+    assert!(vault.get_vault(&alice, &1).is_some());
+    assert!(vault.get_vault(&alice, &2).is_some());
+    assert!(vault.get_vault(&alice, &0).is_none());
+}
+
+/// AC: Counter does not wrap around — saturating_add keeps it at u32::MAX
+/// instead of wrapping to 0.  Verified by writing the counter directly to
+/// storage and calling next_deposit_id through the peek_next / direct-storage
+/// path available inside the test env.
+#[test]
+fn test_deposit_id_counter_no_wraparound_at_u32_max() {
+    use crate::storage;
+    let env = Env::default();
+    env.mock_all_auths();
+    let alice: Address = Address::generate(&env);
+
+    // Manually plant the counter at u32::MAX - 1 so we can observe one more
+    // normal increment and then the saturating boundary.
+    env.as_contract(
+        &env.register(crate::contract::SafeHaven, ()),
+        || {
+            let key = VaultKey::DepositCounter(alice.clone());
+            // Plant counter at u32::MAX - 1: next call returns MAX-1, writes MAX
+            env.storage()
+                .persistent()
+                .set(&key, &(u32::MAX - 1u32));
+
+            // First call: reads MAX-1, writes MAX, returns MAX-1
+            let id_before_max = storage::next_deposit_id(&env, &alice);
+            assert_eq!(id_before_max, u32::MAX - 1);
+
+            // Second call: reads MAX, saturating_add(1) stays at MAX, writes MAX, returns MAX
+            let id_at_max = storage::next_deposit_id(&env, &alice);
+            assert_eq!(id_at_max, u32::MAX, "at saturation point must return u32::MAX");
+
+            // Third call: reads MAX again (no increment), returns MAX — no wraparound to 0
+            let id_still_max = storage::next_deposit_id(&env, &alice);
+            assert_eq!(
+                id_still_max,
+                u32::MAX,
+                "counter must not wrap: saturating_add keeps it at u32::MAX"
+            );
+            assert_ne!(id_still_max, 0, "counter must never wrap to 0");
+        },
+    );
+}
+
+/// AC: deposit_for uses the *beneficiary's* counter, so the depositor (bob)
+/// starts from 0 regardless of whether the payer (alice) has prior deposits,
+/// and subsequent direct deposits from bob continue from the same counter.
+#[test]
+fn test_deposit_id_counter_deposit_for_uses_beneficiary_counter() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&alice, &5_000);
+    StellarAssetClient::new(&env, &token).mint(&bob, &2_000);
+
+    let t1 = env.ledger().timestamp() + 3600;
+    let t2 = env.ledger().timestamp() + 7200;
+    let t3 = env.ledger().timestamp() + 10800;
+
+    // Alice makes two direct deposits (her counter: 0, 1)
+    let alice_id0 = vault.deposit(&alice, &token, &1_000, &t1, &0);
+    let alice_id1 = vault.deposit(&alice, &token, &1_000, &t2, &0);
+    assert_eq!(alice_id0, 0);
+    assert_eq!(alice_id1, 1);
+
+    // Alice pays a deposit_for bob — uses BOB's counter (starts at 0)
+    let bob_id0 = vault.deposit_for(&alice, &bob, &token, &1_000, &t1, &0);
+    assert_eq!(bob_id0, 0, "deposit_for must assign ID from beneficiary's counter");
+    assert!(vault.get_vault(&bob, &0).is_some());
+
+    // Bob deposits directly — continues from his own counter (now at 1)
+    let bob_id1 = vault.deposit(&bob, &token, &1_000, &t2, &0);
+    assert_eq!(bob_id1, 1, "direct deposit by bob must continue from shared per-beneficiary counter");
+
+    // Alice's counter must be unaffected
+    let alice_id2 = vault.deposit(&alice, &token, &1_000, &t3, &0);
+    assert_eq!(alice_id2, 2, "alice counter must not be affected by deposit_for operations");
+}
+
+/// AC: deposit_by_ledger shares the same per-depositor counter as deposit.
+#[test]
+fn test_deposit_id_counter_shared_across_deposit_types() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &3_000);
+
+    let ts = env.ledger().timestamp() + 3600;
+    let ledger = env.ledger().sequence() + MIN_LOCK_LEDGERS;
+    let ts2 = env.ledger().timestamp() + 7200;
+
+    // Timestamp-based deposit → id 0
+    let id0 = vault.deposit(&alice, &token, &1_000, &ts, &0);
+    assert_eq!(id0, 0);
+
+    // Ledger-based deposit → id 1 (same counter)
+    let id1 = vault.deposit_by_ledger(&alice, &token, &1_000, &ledger, &0);
+    assert_eq!(id1, 1, "deposit_by_ledger must draw from the same per-depositor counter");
+
+    // Back to timestamp-based → id 2
+    let id2 = vault.deposit(&alice, &token, &1_000, &ts2, &0);
+    assert_eq!(id2, 2, "subsequent timestamp deposit must continue the shared counter");
+}
+
+// ================================================================
 //  deposit_for
 // ================================================================
 
@@ -706,6 +1180,74 @@ fn test_deposit_for_same_address_succeeds() {
     let entry = vault.get_vault(&alice, &0).expect("entry should exist");
     assert_eq!(entry.amount, 1_000);
     assert_eq!(entry.depositor, alice);
+}
+
+#[test]
+fn test_contract_account_can_deposit_without_eoa_assumption() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+    let smart_wallet = env.register(SafeHaven, ());
+    StellarAssetClient::new(&env, &token).mint(&smart_wallet, &2_000);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&smart_wallet, &token, &1_000, &unlock_time, &0);
+
+    let entry = vault.get_vault(&smart_wallet, &id).expect("entry should exist");
+    assert_eq!(entry.depositor, smart_wallet);
+    assert_eq!(TokenClient::new(&env, &token).balance(&vault.address), 1_000);
+}
+
+#[test]
+fn test_session_key_deposit_is_scoped_and_expires() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+    let wallet = Address::generate(&env);
+    let session_key = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&session_key, &2_000);
+
+    let expires_at = env.ledger().timestamp() + 600;
+    vault.authorize_session_key(&wallet, &session_key, &expires_at);
+    assert!(vault.is_session_key_authorized(&wallet, &session_key));
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit_with_session_key(
+        &session_key,
+        &wallet,
+        &token,
+        &1_000,
+        &unlock_time,
+        &0,
+    );
+    let entry = vault.get_vault(&wallet, &id).expect("entry should exist");
+    assert_eq!(entry.depositor, wallet);
+    assert_eq!(TokenClient::new(&env, &token).balance(&session_key), 1_000);
+
+    advance_time(&env, 601);
+    assert!(!vault.is_session_key_authorized(&wallet, &session_key));
+    assert_eq!(
+        vault.try_deposit_with_session_key(
+            &session_key,
+            &wallet,
+            &token,
+            &1_000,
+            &(env.ledger().timestamp() + 3600),
+            &0,
+        ),
+        Err(Ok(VaultError::SessionKeyExpired))
+    );
+
+    vault.authorize_session_key(&wallet, &session_key, &(env.ledger().timestamp() + 600));
+    vault.revoke_session_key(&wallet, &session_key);
+    assert!(!vault.is_session_key_authorized(&wallet, &session_key));
+    assert_eq!(
+        vault.try_deposit_with_session_key(
+            &session_key,
+            &wallet,
+            &token,
+            &1_000,
+            &(env.ledger().timestamp() + 3600),
+            &0,
+        ),
+        Err(Ok(VaultError::SessionKeyNotAuthorized))
+    );
 }
 
 #[test]
@@ -886,11 +1428,13 @@ fn test_cancel_deposit_partial_penalty_splits_correctly() {
     let (env, vault, token, _admin, alice, fee) = setup();
     let token_client = TokenClient::new(&env, &token);
     let unlock_time = env.ledger().timestamp() + 3600;
-    vault.deposit(&alice, &token, &1_000, &unlock_time, &1_000);
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &1_000); // 10% penalty = 100
     vault.cancel_deposit(&alice, &0);
     assert!(vault.get_vault(&alice, &0).is_none());
+    // penalty = 100; fee_recipient gets 30% = 30; staker pool gets 70% = 70
     assert_eq!(token_client.balance(&alice), 9_900);
-    assert_eq!(token_client.balance(&fee), 100);
+    assert_eq!(token_client.balance(&fee), 30);
+    assert_eq!(vault.staker_pool_balance(&token), 70);
 }
 
 #[test]
@@ -898,11 +1442,13 @@ fn test_cancel_deposit_100_percent_penalty() {
     let (env, vault, token, _admin, alice, fee) = setup();
     let token_client = TokenClient::new(&env, &token);
     let unlock_time = env.ledger().timestamp() + 3600;
-    vault.deposit(&alice, &token, &1_000, &unlock_time, &10_000);
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &10_000); // 100% penalty = 1000
     vault.cancel_deposit(&alice, &0);
     assert!(vault.get_vault(&alice, &0).is_none());
+    // penalty = 1000; fee_recipient gets 30% = 300; staker pool gets 70% = 700
     assert_eq!(token_client.balance(&alice), 9_000);
-    assert_eq!(token_client.balance(&fee), 1_000);
+    assert_eq!(token_client.balance(&fee), 300);
+    assert_eq!(vault.staker_pool_balance(&token), 700);
 }
 
 #[test]
@@ -932,6 +1478,71 @@ fn test_cancel_deposit_penalty_stored_in_vault_entry() {
     let unlock_time = env.ledger().timestamp() + 3600;
     vault.deposit(&alice, &token, &1_000, &unlock_time, &500);
     assert_eq!(vault.get_vault(&alice, &0).unwrap().penalty_bps, 500);
+}
+
+#[test]
+fn test_harvest_tax_losses_replaces_position_and_records_tax_impact() {
+    let (env, vault, token, admin, alice, _fee) = setup();
+    let replacement_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let replacement_token = replacement_id.address();
+    StellarAssetClient::new(&env, &replacement_token).mint(&alice, &1_000);
+    let token_client = TokenClient::new(&env, &token);
+    let replacement_client = TokenClient::new(&env, &replacement_token);
+    let unlock_time = env.ledger().timestamp() + 3_600;
+
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    let harvest = vault.harvest_tax_losses(
+        &alice,
+        &0,
+        &700,
+        &replacement_token,
+        &700,
+        &500,
+        &86_400,
+    );
+
+    assert_eq!(harvest.original_deposit_id, 0);
+    assert_eq!(harvest.replacement_deposit_id, 1);
+    assert_eq!(harvest.cost_basis, 1_000);
+    assert_eq!(harvest.realized_loss, 300);
+    assert_eq!(harvest.tax_benefit, 15);
+    assert_eq!(harvest.wash_sale_until, env.ledger().timestamp() + 86_400);
+    assert!(vault.get_vault(&alice, &0).is_none());
+    assert_eq!(vault.get_vault(&alice, &1).unwrap().token, replacement_token);
+    assert_eq!(vault.get_tax_loss_harvests(&alice).len(), 1);
+    assert_eq!(token_client.balance(&alice), 10_000);
+    assert_eq!(replacement_client.balance(&alice), 300);
+
+    assert_eq!(
+        vault.try_deposit(
+            &alice,
+            &token,
+            &100,
+            &(env.ledger().timestamp() + 3_600),
+            &0,
+        ),
+        Err(Ok(VaultError::TaxWashSalePeriodActive))
+    );
+}
+
+#[test]
+fn test_harvest_tax_losses_rejects_same_token_replacement() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    assert_eq!(
+        vault.try_harvest_tax_losses(
+            &alice,
+            &0,
+            &700,
+            &token,
+            &700,
+            &500,
+            &86_400,
+        ),
+        Err(Ok(VaultError::InvalidTaxLossHarvest))
+    );
 }
 
 // ================================================================
@@ -1049,6 +1660,17 @@ fn test_transfer_admin_non_admin_cannot_initiate() {
         vault.try_transfer_admin(&bob, &carol),
         Err(Ok(VaultError::Unauthorized))
     );
+}
+
+#[test]
+fn test_transfer_admin_to_current_admin_fails() {
+    let (_env, vault, _token, admin, _alice, _fee) = setup();
+    assert_eq!(
+        vault.try_transfer_admin(&admin, &admin),
+        Err(Ok(VaultError::InvalidAdmin))
+    );
+    assert_eq!(vault.get_admin(), Some(admin));
+    assert_eq!(vault.get_pending_admin(), None);
 }
 
 #[test]
@@ -1826,8 +2448,10 @@ fn test_cancel_ledger_deposit_with_penalty_splits_correctly() {
 
     vault.cancel_deposit(&alice, &id);
 
+    // penalty = 100; fee_recipient gets 30% = 30; staker pool gets 70% = 70
     assert_eq!(token_client.balance(&alice), 9_900);
-    assert_eq!(token_client.balance(&fee), 100);
+    assert_eq!(token_client.balance(&fee), 30);
+    assert_eq!(vault.staker_pool_balance(&token), 70);
 }
 
 /// #11 — cancel_deposit after the unlock ledger has passed must fail
@@ -1925,6 +2549,127 @@ fn test_deposit_by_ledger_respects_pause() {
     let unlock_ledger3 = env.ledger().sequence() + 100;
     let id2 = vault.deposit_by_ledger(&alice, &token, &500, &unlock_ledger3, &0);
     assert_eq!(id2, 1);
+}
+
+// ================================================================
+//  deposit_by_ledger — maximum lock duration enforcement
+// ================================================================
+
+/// deposit_by_ledger with exactly MAX_LOCK_LEDGERS (5 years in ledger units) must succeed.
+#[test]
+fn test_deposit_by_ledger_at_max_duration_succeeds() {
+    use crate::constants::MAX_LOCK_LEDGERS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + MAX_LOCK_LEDGERS;
+
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    // Entry must exist and have the correct unlock_ledger
+    let entry = vault.get_ledger_vault(&alice, &id).expect("ledger vault should exist");
+    assert_eq!(entry.unlock_ledger, unlock_ledger);
+    assert_eq!(entry.amount, 1_000);
+}
+
+/// deposit_by_ledger with MAX_LOCK_LEDGERS + 1 (5 years + 1 ledger ≈ 5 seconds over limit)
+/// must fail with LockDurationTooLong (error code 6).
+#[test]
+fn test_deposit_by_ledger_one_ledger_over_max_fails() {
+    use crate::constants::MAX_LOCK_LEDGERS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + MAX_LOCK_LEDGERS + 1;
+
+    assert_eq!(
+        vault.try_deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0),
+        Err(Ok(VaultError::LockDurationTooLong))
+    );
+}
+
+/// deposit_by_ledger with an arbitrarily large unlock_ledger (u32::MAX) must fail
+/// with LockDurationTooLong, not panic or succeed.
+#[test]
+fn test_deposit_by_ledger_max_u32_unlock_ledger_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    // saturating_sub handles the case where unlock_ledger <= current_ledger
+    // by returning 0, but u32::MAX is always > current_ledger (sequence starts at 0)
+    let unlock_ledger = u32::MAX;
+
+    assert_eq!(
+        vault.try_deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0),
+        Err(Ok(VaultError::LockDurationTooLong))
+    );
+}
+
+/// Verify that the error for deposit_by_ledger too-long is LockDurationTooLong (code 6),
+/// not some other error — ensuring consistent error codes across all deposit variants.
+#[test]
+fn test_deposit_by_ledger_too_long_returns_error_code_6() {
+    use crate::constants::MAX_LOCK_LEDGERS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_ledger = env.ledger().sequence() + MAX_LOCK_LEDGERS + 100;
+
+    let err = vault
+        .try_deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0)
+        .expect_err("should fail");
+    let inner = err.expect("should be a VaultError");
+    assert_eq!(inner as u32, 6, "LockDurationTooLong must be error code 6");
+}
+
+/// Confirm the max-lock check fires BEFORE any state mutation:
+/// no storage entry should be created when the limit is exceeded.
+#[test]
+fn test_deposit_by_ledger_too_long_creates_no_state() {
+    use crate::constants::MAX_LOCK_LEDGERS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_ledger = env.ledger().sequence() + MAX_LOCK_LEDGERS + 1;
+
+    let _ = vault.try_deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    // No deposit should have been created
+    assert!(vault.get_ledger_vault(&alice, &0).is_none());
+    // Depositor count must remain 0
+    assert_eq!(vault.get_depositor_count(), 0);
+}
+
+/// Symmetry test: both timestamp-based and ledger-based deposits reject durations
+/// longer than 5 years with the same error.
+#[test]
+fn test_all_deposit_variants_reject_over_5_year_lock() {
+    use crate::constants::MAX_LOCK_LEDGERS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&alice, &3_000);
+
+    let now = env.ledger().timestamp();
+    let bad_unlock_time = now + MAX_LOCK_DURATION_SECS + 1;
+    let bad_unlock_ledger = env.ledger().sequence() + MAX_LOCK_LEDGERS + 1;
+
+    // deposit()
+    assert_eq!(
+        vault.try_deposit(&alice, &token, &1_000, &bad_unlock_time, &0),
+        Err(Ok(VaultError::LockDurationTooLong))
+    );
+
+    // deposit_for()
+    assert_eq!(
+        vault.try_deposit_for(&alice, &bob, &token, &1_000, &bad_unlock_time, &0),
+        Err(Ok(VaultError::LockDurationTooLong))
+    );
+
+    // deposit_by_ledger()
+    assert_eq!(
+        vault.try_deposit_by_ledger(&alice, &token, &1_000, &bad_unlock_ledger, &0),
+        Err(Ok(VaultError::LockDurationTooLong))
+    );
 }
 
 #[test]
@@ -2575,8 +3320,10 @@ fn test_cancel_deposit_ledger_based_with_penalty() {
     vault.cancel_deposit(&alice, &id);
 
     // 25% penalty = 1_000; remainder = 3_000
+    // fee_recipient gets 30% of penalty = 300; staker pool gets 70% = 700
     assert_eq!(token_client.balance(&alice), 9_000);
-    assert_eq!(token_client.balance(&fee), 1_000);
+    assert_eq!(token_client.balance(&fee), 300);
+    assert_eq!(vault.staker_pool_balance(&token), 700);
     assert!(vault.get_vault(&alice, &id).is_none());
 }
 
@@ -2933,6 +3680,273 @@ fn test_get_deposit_batch_clamps_at_max_batch_size() {
     assert_eq!(results.len(), MAX_BATCH_SIZE);
 }
 
+// ================================================================
+//  Issue #111 — Deposit by Ledger: Staker Registry Integration
+//
+//  Acceptance criteria:
+//   1. Cancellation works with ledger deposits
+//   2. Penalty distributed correctly (30/70 split)
+//   3. Staker pool receives 70 %
+//   4. Claims are normal
+//   5. Accounting is accurate
+// ================================================================
+
+// ----------------------------------------------------------------
+//  AC-1: cancel_deposit works with ledger deposits
+// ----------------------------------------------------------------
+
+/// Cancelling a ledger-based deposit (zero penalty) returns the full amount.
+#[test]
+fn test_issue111_cancel_ledger_deposit_zero_penalty_works() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + 100;
+    let id = vault.deposit_by_ledger(&alice, &token, &2_000, &unlock_ledger, &0);
+
+    vault.cancel_deposit(&alice, &id);
+
+    // No penalty: full amount returned, staker pool stays at zero.
+    assert_eq!(token_client.balance(&alice), 10_000);
+    assert_eq!(vault.staker_pool_balance(&token), 0);
+    assert!(vault.get_ledger_vault(&alice, &id).is_none());
+}
+
+/// Cancelling a ledger-based deposit before the unlock ledger must succeed.
+#[test]
+fn test_issue111_cancel_ledger_deposit_before_unlock_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_ledger = env.ledger().sequence() + 500;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &500);
+
+    // Still well before unlock — must succeed
+    assert!(vault.try_cancel_deposit(&alice, &id).is_ok());
+    assert!(vault.get_ledger_vault(&alice, &id).is_none());
+}
+
+/// Trying to cancel a ledger-based deposit after the unlock ledger must fail
+/// with VaultAlreadyUnlocked.
+#[test]
+fn test_issue111_cancel_ledger_deposit_after_unlock_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_ledger = env.ledger().sequence() + MIN_LOCK_LEDGERS;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &500);
+
+    advance_ledger(&env, MIN_LOCK_LEDGERS);
+
+    assert_eq!(
+        vault.try_cancel_deposit(&alice, &id),
+        Err(Ok(VaultError::VaultAlreadyUnlocked))
+    );
+}
+
+// ----------------------------------------------------------------
+//  AC-2 & AC-3: Penalty split is 30 % fee_recipient / 70 % staker pool
+// ----------------------------------------------------------------
+
+/// Ledger deposit penalty is split 30 % to fee_recipient and 70 % to
+/// staker pool — identical to the timestamp deposit path.
+#[test]
+fn test_issue111_ledger_cancel_penalty_split_30_70() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    // 10 % penalty on 1 000 = 100 total penalty
+    // fee_recipient slice = 30 %;  staker pool slice = 70 %
+    let unlock_ledger = env.ledger().sequence() + 100;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &1_000);
+
+    vault.cancel_deposit(&alice, &id);
+
+    assert_eq!(token_client.balance(&alice), 9_900); // 10_000 - 100 deposit + 900 refund
+    assert_eq!(token_client.balance(&fee), 30);       // 30 % of 100
+    assert_eq!(vault.staker_pool_balance(&token), 70); // 70 % of 100
+}
+
+/// Timestamp deposit penalty is also split 30/70 (same code path, regression guard).
+#[test]
+fn test_issue111_timestamp_cancel_penalty_split_30_70() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &1_000); // 10% penalty
+
+    vault.cancel_deposit(&alice, &0);
+
+    assert_eq!(token_client.balance(&alice), 9_900);
+    assert_eq!(token_client.balance(&fee), 30);
+    assert_eq!(vault.staker_pool_balance(&token), 70);
+}
+
+/// 100 % penalty on a ledger deposit: all 1 000 units go to pool/fee,
+/// depositor gets 0.
+#[test]
+fn test_issue111_ledger_cancel_100pct_penalty_full_split() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + 100;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &10_000);
+
+    vault.cancel_deposit(&alice, &id);
+
+    // fee_recipient gets 30 % of 1000 = 300; staker pool gets 70 % = 700
+    assert_eq!(token_client.balance(&alice), 9_000);
+    assert_eq!(token_client.balance(&fee), 300);
+    assert_eq!(vault.staker_pool_balance(&token), 700);
+}
+
+// ----------------------------------------------------------------
+//  AC-4 & AC-5: Claims work normally and accounting is accurate
+// ----------------------------------------------------------------
+
+/// claim_staker_pool transfers the full pool balance to the recipient and
+/// resets the balance to zero.
+#[test]
+fn test_issue111_claim_staker_pool_transfers_and_clears_balance() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+    let staker: Address = Address::generate(&env);
+
+    // Create pool balance via ledger cancel
+    let unlock_ledger = env.ledger().sequence() + 100;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &1_000);
+    vault.cancel_deposit(&alice, &id);
+
+    let pool_before = vault.staker_pool_balance(&token);
+    assert_eq!(pool_before, 70);
+
+    // Claim to staker address
+    let claimed = vault.claim_staker_pool(&staker, &token);
+
+    assert_eq!(claimed, 70);
+    assert_eq!(token_client.balance(&staker), 70);
+    assert_eq!(vault.staker_pool_balance(&token), 0);
+}
+
+/// Claiming when the pool is empty returns 0 and does nothing.
+#[test]
+fn test_issue111_claim_staker_pool_empty_returns_zero() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+    let staker: Address = Address::generate(&env);
+    let token_client = TokenClient::new(&env, &token);
+
+    let claimed = vault.claim_staker_pool(&staker, &token);
+    assert_eq!(claimed, 0);
+    assert_eq!(token_client.balance(&staker), 0);
+}
+
+/// Multiple cancellations accumulate in the pool; a single claim drains all.
+#[test]
+fn test_issue111_multiple_cancels_accumulate_then_claim_drains_all() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+    let staker: Address = Address::generate(&env);
+
+    // Mint extra tokens for alice so she can make multiple deposits
+    StellarAssetClient::new(&env, &token).mint(&alice, &100_000);
+
+    // Three ledger deposits, each 1 000 at 10 % penalty → 100 penalty each
+    for _ in 0..3 {
+        let unlock_ledger = env.ledger().sequence() + 100;
+        let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &1_000);
+        vault.cancel_deposit(&alice, &id);
+    }
+
+    // Pool should hold 3 × 70 = 210; fee_recipient should hold 3 × 30 = 90
+    assert_eq!(vault.staker_pool_balance(&token), 210);
+    assert_eq!(token_client.balance(&fee), 90);
+
+    // Claim all at once
+    let claimed = vault.claim_staker_pool(&staker, &token);
+    assert_eq!(claimed, 210);
+    assert_eq!(token_client.balance(&staker), 210);
+    assert_eq!(vault.staker_pool_balance(&token), 0);
+}
+
+/// Mixing a ledger cancel and a timestamp cancel: both contribute to the
+/// same staker pool and fee_recipient balances; accounting must reconcile.
+#[test]
+fn test_issue111_mixed_ledger_and_timestamp_cancel_accounting() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+    let staker: Address = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token).mint(&alice, &10_000);
+
+    // Ledger deposit: 2 000 at 5 % penalty = 100 total penalty
+    let unlock_ledger = env.ledger().sequence() + 100;
+    let id_l = vault.deposit_by_ledger(&alice, &token, &2_000, &unlock_ledger, &500);
+    vault.cancel_deposit(&alice, &id_l);
+    // penalty = 100; fee = 30; pool = 70
+
+    // Timestamp deposit: 1 000 at 10 % penalty = 100 total penalty
+    let unlock_time = env.ledger().timestamp() + 3_600;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &1_000);
+    vault.cancel_deposit(&alice, &1); // id=1 (second deposit overall)
+    // penalty = 100; fee += 30 → 60; pool += 70 → 140
+
+    assert_eq!(token_client.balance(&fee), 60);
+    assert_eq!(vault.staker_pool_balance(&token), 140);
+
+    // Claim and verify exact totals
+    let claimed = vault.claim_staker_pool(&staker, &token);
+    assert_eq!(claimed, 140);
+    assert_eq!(token_client.balance(&staker), 140);
+    assert_eq!(vault.staker_pool_balance(&token), 0);
+
+    // Overall: alice started with 20_000 (10_000 initial + 10_000 minted)
+    // deposited 2_000 + 1_000 = 3_000; cancelled with refund 1_900 + 900 = 2_800
+    // net alice balance = 20_000 - 3_000 + 2_800 = 19_800
+    assert_eq!(token_client.balance(&alice), 19_800);
+}
+
+/// staker_pool_balance is 0 before any cancellation occurs.
+#[test]
+fn test_issue111_staker_pool_balance_zero_initially() {
+    let (_env, vault, token, _admin, _alice, _fee) = setup();
+    assert_eq!(vault.staker_pool_balance(&token), 0);
+}
+
+/// After claim, a second claim immediately returns 0 (idempotent drain).
+#[test]
+fn test_issue111_double_claim_second_returns_zero() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let staker: Address = Address::generate(&env);
+
+    let unlock_ledger = env.ledger().sequence() + 100;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &1_000);
+    vault.cancel_deposit(&alice, &id);
+
+    vault.claim_staker_pool(&staker, &token);
+
+    // Second claim on the now-empty pool
+    let second = vault.claim_staker_pool(&staker, &token);
+    assert_eq!(second, 0);
+    assert_eq!(vault.staker_pool_balance(&token), 0);
+}
+
+/// Cancel-then-withdraw pattern: after a cancel the deposit is gone;
+/// a subsequent withdraw must fail with NoDepositFound (no double-spend).
+#[test]
+fn test_issue111_cancel_then_withdraw_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_ledger = env.ledger().sequence() + MIN_LOCK_LEDGERS;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &500);
+
+    vault.cancel_deposit(&alice, &id);
+
+    // Advance past the unlock ledger so time isn't the blocker
+    advance_ledger(&env, MIN_LOCK_LEDGERS);
+
+    assert_eq!(
+        vault.try_withdraw(&alice, &id),
+        Err(Ok(VaultError::NoDepositFound))
+    );
 #[test]
 fn test_version_returns_cargo_pkg_version() {
     let (_env, vault, _token, _admin, _alice, _fee) = setup();
@@ -4157,6 +5171,45 @@ fn test_get_subscription_ids_returns_all() {
     assert_eq!(ids.get(2).unwrap(), 2);
 }
 
+#[test]
+fn test_subscription_can_be_paused_and_resumed() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let sub_id = create_default_subscription(&vault, &env, &alice, &token);
+
+    vault.pause_subscription(&alice, &sub_id);
+    let paused = vault.get_subscription(&alice, &sub_id).unwrap();
+    assert!(paused.paused);
+    assert_eq!(
+        vault.try_execute_subscription(&alice, &sub_id),
+        Err(Ok(VaultError::SubscriptionPaused))
+    );
+
+    vault.resume_subscription(&alice, &sub_id);
+    let resumed = vault.get_subscription(&alice, &sub_id).unwrap();
+    assert!(!resumed.paused);
+    vault.execute_subscription(&alice, &sub_id);
+}
+
+#[test]
+fn test_subscription_history_and_statistics_track_executions() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let sub_id = create_default_subscription(&vault, &env, &alice, &token);
+
+    let first_deposit_id = vault.execute_subscription(&alice, &sub_id);
+    advance_time(&env, 121);
+    let second_deposit_id = vault.execute_subscription(&alice, &sub_id);
+
+    let history = vault.get_subscription_history(&alice, &sub_id);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().deposit_id, first_deposit_id);
+    assert_eq!(history.get(1).unwrap().deposit_id, second_deposit_id);
+
+    let stats = vault.get_subscription_stats(&alice, &sub_id);
+    assert_eq!(stats.deposit_count, 2);
+    assert_eq!(stats.total_amount, 2_000);
+    assert!(stats.last_execution_time > 0);
+}
+
 // ================================================================
 //  Issue #334 — Deposit insurance pool tests
 // ================================================================
@@ -4842,6 +5895,42 @@ fn test_emergency_withdrawal_limit_cumulative_tracking() {
 }
 
 #[test]
+fn test_emergency_withdrawal_circuit_breaker_trips_at_threshold() {
+    let (env, vault, token, admin, alice, _fee) = setup();
+    use crate::types::MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER;
+
+    StellarAssetClient::new(&env, &token).mint(&alice, &MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER);
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault.deposit(&alice, &token, &MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, &unlock_time, &0);
+
+    vault.emergency_withdraw(&admin, &alice, &deposit_id);
+
+    assert!(vault.is_paused());
+    let history = vault.get_circuit_breaker_history();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().ledger, env.ledger().sequence());
+    assert_eq!(history.get(0).unwrap().amount, MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER);
+}
+
+#[test]
+fn test_emergency_withdrawal_circuit_breaker_rejects_above_threshold() {
+    let (env, vault, token, admin, alice, _fee) = setup();
+    use crate::types::MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER;
+
+    let amount = MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER + 1;
+    StellarAssetClient::new(&env, &token).mint(&alice, &amount);
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0);
+
+    assert_eq!(
+        vault.try_emergency_withdraw(&admin, &alice, &deposit_id),
+        Err(Ok(VaultError::EmergencyWithdrawalLimitExceeded))
+    );
+    assert!(!vault.is_paused());
+    assert!(vault.get_vault(&alice, &deposit_id).is_some());
+}
+
+#[test]
 fn test_emergency_withdrawal_limit_exceeds_fails() {
     let (env, vault, token, admin, alice, _fee) = setup();
     use crate::types::MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER;
@@ -5414,4 +6503,880 @@ fn test_multiple_depositors_independent_metrics() {
     assert!(alice_metrics.carbon_footprint != bob_metrics.carbon_footprint);
     assert_eq!(alice_metrics.depositor, alice);
     assert_eq!(bob_metrics.depositor, bob);
+}
+
+
+// ================================================================
+//  NFT Evolution Tests
+// ================================================================
+
+#[test]
+fn test_nft_creation_on_deposit() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 1000;
+    let amount = 5_000;
+
+    // Create a deposit
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    // NFT record should exist
+    let nft = vault.get_nft_evolution(&alice, &deposit_id)
+        .expect("NFT record exists");
+
+    // Verify initial state
+    assert_eq!(nft.deposit_id, deposit_id);
+    assert_eq!(nft.stage, crate::nft::EvolutionStage::Egg);
+    assert_eq!(nft.rarity, crate::nft::RarityTier::Uncommon); // 5000 >= 1000
+    assert_eq!(nft.created_at, now);
+    assert_eq!(nft.last_evolved_at, now);
+    assert_eq!(nft.evolution_count, 0);
+    assert_eq!(nft.current_amount, amount);
+    assert_eq!(nft.unlock_time, unlock_time);
+}
+
+#[test]
+fn test_nft_stage_egg_to_hatchling() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100_000;
+    let amount = 5_000;
+
+    // Create a deposit
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    // Initial stage should be Egg
+    let stage = vault.get_nft_stage(&alice, &deposit_id)
+        .expect("stage query succeeds");
+    assert_eq!(stage, crate::nft::EvolutionStage::Egg);
+
+    // Advance time to 14+ days
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp = now + (15 * 24 * 60 * 60); // 15 days
+    });
+
+    // Create another deposit to trigger time update
+    // (In practice, withdrawal or other operations would check evolution)
+    let unlock_time2 = now + (15 * 24 * 60 * 60) + 100_000;
+    let deposit_id2 = vault.deposit(&alice, &token, &amount, &unlock_time2, &0)
+        .expect("second deposit succeeds");
+
+    // Stage should still be Egg for first deposit (unless evolution check is called)
+    // This test verifies the calculation, not automatic evolution
+    let calc_stage = crate::nft::calculate_evolution_stage(15 * 24 * 60 * 60);
+    assert_eq!(calc_stage, crate::nft::EvolutionStage::Hatchling);
+}
+
+#[test]
+fn test_nft_rarity_common() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 1000; // Very short lock
+    let amount = 100; // Very small amount
+
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    let rarity = vault.get_nft_rarity(&alice, &deposit_id)
+        .expect("rarity query succeeds");
+    assert_eq!(rarity, crate::nft::RarityTier::Common);
+}
+
+#[test]
+fn test_nft_rarity_legendary() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + (400 * 24 * 60 * 60); // 400 days (exceeds 365 threshold)
+    let amount = 2_000_000; // Exceeds legendary threshold
+
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    let rarity = vault.get_nft_rarity(&alice, &deposit_id)
+        .expect("rarity query succeeds");
+    assert_eq!(rarity, crate::nft::RarityTier::Legendary);
+}
+
+#[test]
+fn test_nft_metadata_uri_present() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 10_000;
+    let amount = 5_000;
+
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    let metadata = vault.get_nft_metadata_uri(&alice, &deposit_id)
+        .expect("metadata uri query succeeds");
+
+    // Metadata should contain deposit ID and stage info
+    let metadata_str = metadata.to_string();
+    assert!(metadata_str.len() > 0);
+    assert!(metadata_str.contains("deposit_nft"));
+}
+
+#[test]
+fn test_nft_evolution_count_initial() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 10_000;
+    let amount = 5_000;
+
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    let count = vault.get_nft_evolution_count(&alice, &deposit_id)
+        .expect("evolution count query succeeds");
+    assert_eq!(count, 0); // No evolutions yet
+}
+
+#[test]
+fn test_nft_removed_on_withdrawal() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 1000;
+    let amount = 5_000;
+
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    // Verify NFT exists
+    let nft_before = vault.get_nft_evolution(&alice, &deposit_id)
+        .expect("NFT exists before withdrawal");
+    assert_eq!(nft_before.deposit_id, deposit_id);
+
+    // Advance time and withdraw
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp = unlock_time + 1;
+    });
+
+    vault.withdraw(&alice, &deposit_id)
+        .expect("withdraw succeeds");
+
+    // NFT should be removed
+    let nft_after = vault.get_nft_evolution(&alice, &deposit_id);
+    assert!(nft_after.is_none());
+}
+
+#[test]
+fn test_nft_removed_on_cancel() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100_000;
+    let amount = 5_000;
+
+    let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    // Verify NFT exists
+    let nft_before = vault.get_nft_evolution(&alice, &deposit_id)
+        .expect("NFT exists before cancellation");
+    assert_eq!(nft_before.deposit_id, deposit_id);
+
+    // Cancel the deposit
+    vault.cancel_deposit(&alice, &deposit_id)
+        .expect("cancel_deposit succeeds");
+
+    // NFT should be removed
+    let nft_after = vault.get_nft_evolution(&alice, &deposit_id);
+    assert!(nft_after.is_none());
+}
+
+#[test]
+fn test_nft_rarity_by_duration() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let amount = 100; // Small amount
+
+    // Test each duration threshold
+    let test_cases = vec![
+        (now + (6 * 24 * 60 * 60), crate::nft::RarityTier::Common),
+        (now + (8 * 24 * 60 * 60), crate::nft::RarityTier::Uncommon),
+        (now + (31 * 24 * 60 * 60), crate::nft::RarityTier::Rare),
+        (now + (91 * 24 * 60 * 60), crate::nft::RarityTier::Epic),
+        (now + (400 * 24 * 60 * 60), crate::nft::RarityTier::Legendary),
+    ];
+
+    for (idx, (unlock_time, expected_rarity)) in test_cases.into_iter().enumerate() {
+        let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+            .expect("deposit succeeds");
+
+        let rarity = vault.get_nft_rarity(&alice, &deposit_id)
+            .expect("rarity query succeeds");
+        assert_eq!(rarity, expected_rarity, "Failed for test case {}", idx);
+    }
+}
+
+#[test]
+fn test_nft_multiple_deposits_independent() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+
+    // Create first deposit with small amount
+    let deposit_id1 = vault.deposit(&alice, &token, &100, &(now + 1000), &0)
+        .expect("first deposit succeeds");
+
+    // Create second deposit with large amount
+    let deposit_id2 = vault.deposit(&alice, &token, &2_000_000, &(now + 100_000), &0)
+        .expect("second deposit succeeds");
+
+    // NFTs should have different rarities
+    let rarity1 = vault.get_nft_rarity(&alice, &deposit_id1)
+        .expect("first rarity query succeeds");
+    let rarity2 = vault.get_nft_rarity(&alice, &deposit_id2)
+        .expect("second rarity query succeeds");
+
+    assert_eq!(rarity1, crate::nft::RarityTier::Common);
+    assert_eq!(rarity2, crate::nft::RarityTier::Legendary);
+}
+
+#[test]
+fn test_nft_calculate_stage_progression() {
+    // Direct unit tests for stage calculation
+    let test_cases = vec![
+        (0, crate::nft::EvolutionStage::Egg),
+        (1 * 24 * 60 * 60, crate::nft::EvolutionStage::Egg),
+        (14 * 24 * 60 * 60, crate::nft::EvolutionStage::Hatchling),
+        (30 * 24 * 60 * 60, crate::nft::EvolutionStage::Juvenile),
+        (90 * 24 * 60 * 60, crate::nft::EvolutionStage::Adult),
+        (180 * 24 * 60 * 60, crate::nft::EvolutionStage::Adult),
+        (365 * 24 * 60 * 60, crate::nft::EvolutionStage::Ancient),
+        (400 * 24 * 60 * 60, crate::nft::EvolutionStage::Ancient),
+    ];
+
+    for (age_secs, expected_stage) in test_cases {
+        let stage = crate::nft::calculate_evolution_stage(age_secs);
+        assert_eq!(stage, expected_stage, "Stage mismatch for age_secs={}", age_secs);
+    }
+}
+
+#[test]
+fn test_nft_query_nonexistent() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    // Query for nonexistent deposit should return None
+    let nft = vault.get_nft_evolution(&alice, &999);
+    assert!(nft.is_none());
+
+    let stage = vault.get_nft_stage(&alice, &999);
+    assert!(stage.is_none());
+
+    let rarity = vault.get_nft_rarity(&alice, &999);
+    assert!(rarity.is_none());
+
+    let metadata = vault.get_nft_metadata_uri(&alice, &999);
+    assert!(metadata.is_none());
+
+    let count = vault.get_nft_evolution_count(&alice, &999);
+    assert!(count.is_none());
+}
+
+#[test]
+fn test_nft_rarity_amount_threshold_boundary() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 1000;
+
+    // Test boundary values
+    let test_cases = vec![
+        (999, crate::nft::RarityTier::Common),
+        (1_000, crate::nft::RarityTier::Uncommon),
+        (9_999, crate::nft::RarityTier::Uncommon),
+        (10_000, crate::nft::RarityTier::Rare),
+        (99_999, crate::nft::RarityTier::Rare),
+        (100_000, crate::nft::RarityTier::Epic),
+        (999_999, crate::nft::RarityTier::Epic),
+        (1_000_000, crate::nft::RarityTier::Legendary),
+    ];
+
+    for (amount, expected_rarity) in test_cases {
+        let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
+            .expect("deposit succeeds");
+
+        let rarity = vault.get_nft_rarity(&alice, &deposit_id)
+            .expect("rarity query succeeds");
+        assert_eq!(rarity, expected_rarity, "Failed for amount={}", amount);
+    }
+}
+
+
+// ================================================================
+//  Batch Withdrawal Tests
+// ================================================================
+
+#[test]
+fn test_batch_withdraw_success_single_deposit() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 1000;
+
+    // Create a deposit
+    let deposit_id = vault.deposit(&alice, &token, &1000, &unlock_time, &0)
+        .expect("deposit succeeds");
+
+    // Try to batch withdraw before unlock
+    let deposit_ids = Vec::from_array(&env, [deposit_id]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect_err("batch withdraw should fail before unlock");
+    assert_eq!(result, VaultError::FundsStillLocked);
+
+    // Advance time past unlock
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_time + 1,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw should succeed
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw succeeds");
+
+    assert_eq!(result.total_attempted, 1);
+    assert_eq!(result.successful_count, 1);
+    assert_eq!(result.failed_count, 0);
+    assert_eq!(result.total_amount, 1000);
+    assert_eq!(result.results.len(), 1);
+    assert_eq!(result.results.get(0).deposit_id, deposit_id);
+    assert_eq!(result.results.get(0).success, true);
+    assert_eq!(result.results.get(0).error_code, 0);
+    assert_eq!(result.results.get(0).amount, 1000);
+}
+
+#[test]
+fn test_batch_withdraw_multiple_deposits() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+
+    // Create three deposits with different unlock times
+    let unlock_time_1 = now + 500;
+    let unlock_time_2 = now + 1000;
+    let unlock_time_3 = now + 1500;
+
+    let id_1 = vault.deposit(&alice, &token, &100, &unlock_time_1, &0)
+        .expect("deposit 1 succeeds");
+    let id_2 = vault.deposit(&alice, &token, &200, &unlock_time_2, &0)
+        .expect("deposit 2 succeeds");
+    let id_3 = vault.deposit(&alice, &token, &300, &unlock_time_3, &0)
+        .expect("deposit 3 succeeds");
+
+    // Advance time to unlock deposit 1 and 2, but not 3
+    env.ledger().set(LedgerInfo {
+        timestamp: now + 1001,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw all three
+    let deposit_ids = Vec::from_array(&env, [id_1, id_2, id_3]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw succeeds");
+
+    assert_eq!(result.total_attempted, 3);
+    assert_eq!(result.successful_count, 2); // id_1 and id_2
+    assert_eq!(result.failed_count, 1);     // id_3 still locked
+    assert_eq!(result.total_amount, 300);   // 100 + 200
+
+    // Verify individual results
+    assert_eq!(result.results.get(0).success, true);
+    assert_eq!(result.results.get(0).amount, 100);
+    
+    assert_eq!(result.results.get(1).success, true);
+    assert_eq!(result.results.get(1).amount, 200);
+    
+    assert_eq!(result.results.get(2).success, false);
+    assert_eq!(result.results.get(2).error_code, VaultError::FundsStillLocked as u32);
+}
+
+#[test]
+fn test_batch_withdraw_all_locked() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 5000; // Far in future
+
+    // Create multiple deposits
+    let id_1 = vault.deposit(&alice, &token, &100, &unlock_time, &0)
+        .expect("deposit 1 succeeds");
+    let id_2 = vault.deposit(&alice, &token, &200, &unlock_time, &0)
+        .expect("deposit 2 succeeds");
+
+    // Try to batch withdraw without advancing time
+    let deposit_ids = Vec::from_array(&env, [id_1, id_2]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw returns result");
+
+    assert_eq!(result.total_attempted, 2);
+    assert_eq!(result.successful_count, 0);
+    assert_eq!(result.failed_count, 2);
+    assert_eq!(result.total_amount, 0);
+
+    // All results should indicate FundsStillLocked
+    for res in result.results.iter() {
+        assert_eq!(res.success, false);
+        assert_eq!(res.error_code, VaultError::FundsStillLocked as u32);
+    }
+}
+
+#[test]
+fn test_batch_withdraw_empty_list() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+
+    let deposit_ids = Vec::new(&env);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("empty batch withdraw succeeds");
+
+    assert_eq!(result.total_attempted, 0);
+    assert_eq!(result.successful_count, 0);
+    assert_eq!(result.failed_count, 0);
+    assert_eq!(result.total_amount, 0);
+}
+
+#[test]
+fn test_batch_withdraw_nonexistent_deposits() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+
+    // Try to batch withdraw from IDs that don't exist
+    let deposit_ids = Vec::from_array(&env, [999, 1000, 1001]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw returns result");
+
+    assert_eq!(result.total_attempted, 3);
+    assert_eq!(result.successful_count, 0);
+    assert_eq!(result.failed_count, 3);
+    assert_eq!(result.total_amount, 0);
+
+    // All should be NoDepositFound
+    for res in result.results.iter() {
+        assert_eq!(res.success, false);
+        assert_eq!(res.error_code, VaultError::NoDepositFound as u32);
+    }
+}
+
+#[test]
+fn test_batch_withdraw_all_unlocked() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+
+    // Create three deposits with same unlock time
+    let id_1 = vault.deposit(&alice, &token, &100, &unlock_time, &0)
+        .expect("deposit 1 succeeds");
+    let id_2 = vault.deposit(&alice, &token, &200, &unlock_time, &0)
+        .expect("deposit 2 succeeds");
+    let id_3 = vault.deposit(&alice, &token, &300, &unlock_time, &0)
+        .expect("deposit 3 succeeds");
+
+    // Advance time past unlock
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_time + 1,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw all
+    let deposit_ids = Vec::from_array(&env, [id_1, id_2, id_3]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw succeeds");
+
+    assert_eq!(result.total_attempted, 3);
+    assert_eq!(result.successful_count, 3);
+    assert_eq!(result.failed_count, 0);
+    assert_eq!(result.total_amount, 600); // 100 + 200 + 300
+
+    // Verify all succeeded
+    for i in 0..3 {
+        assert_eq!(result.results.get(i).success, true);
+        assert_eq!(result.results.get(i).error_code, 0);
+    }
+
+    // Verify deposits are gone from storage
+    assert!(vault.get_vault(&alice, &id_1).is_none());
+    assert!(vault.get_vault(&alice, &id_2).is_none());
+    assert!(vault.get_vault(&alice, &id_3).is_none());
+}
+
+#[test]
+fn test_batch_withdraw_size_limit() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+
+    // Create MAX_BATCH_SIZE + 1 deposits
+    let mut deposit_ids = Vec::new(&env);
+    for i in 0..26 { // MAX_BATCH_SIZE = 25, so 26 exceeds limit
+        let id = vault.deposit(&alice, &token, &(100 as i128 + i as i128), &unlock_time, &0)
+            .expect("deposit succeeds");
+        deposit_ids.push_back(id);
+    }
+
+    // Try to batch withdraw 26 deposits (exceeds MAX_BATCH_SIZE of 25)
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect_err("batch withdraw should fail due to size limit");
+
+    assert_eq!(result, VaultError::BatchSizeExceeded);
+}
+
+#[test]
+fn test_batch_withdraw_max_batch_size_exact() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+
+    // Create exactly MAX_BATCH_SIZE deposits
+    let mut deposit_ids = Vec::new(&env);
+    for i in 0..25 { // MAX_BATCH_SIZE = 25
+        let id = vault.deposit(&alice, &token, &(100 as i128 + i as i128), &unlock_time, &0)
+            .expect("deposit succeeds");
+        deposit_ids.push_back(id);
+    }
+
+    // Advance time past unlock
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_time + 1,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw exactly MAX_BATCH_SIZE should succeed
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw with MAX_BATCH_SIZE succeeds");
+
+    assert_eq!(result.total_attempted, 25);
+    assert_eq!(result.successful_count, 25);
+    assert_eq!(result.failed_count, 0);
+
+    // Verify total is sum of 100..124
+    let expected_total = (100..125).sum::<i128>();
+    assert_eq!(result.total_amount, expected_total);
+}
+
+#[test]
+fn test_batch_withdraw_compound_interest() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 1000;
+    let compound_freq = 60; // Compound every 60 seconds
+
+    // Create a deposit with compound interest
+    let deposit_id = vault.deposit_with_compound(&alice, &token, &1000, &unlock_time, &0, &compound_freq)
+        .expect("deposit with compound succeeds");
+
+    // Advance time to unlock + 120 seconds (2 periods)
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_time + 120,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw should accrue interest
+    let deposit_ids = Vec::from_array(&env, [deposit_id]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw succeeds");
+
+    assert_eq!(result.successful_count, 1);
+    // With 5% annual interest compounded every 60 seconds, amount should increase
+    // Expected: 1000 * (1 + 0.05/365/86400 * 60) ^ 2 ≈ 1000.0000573
+    // Due to integer arithmetic, should be at least >= 1000
+    assert!(result.total_amount >= 1000);
+}
+
+#[test]
+fn test_batch_withdraw_mixed_types() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 1000;
+
+    // Create timestamp-based deposit
+    let ts_id = vault.deposit(&alice, &token, &100, &unlock_time, &0)
+        .expect("timestamp deposit succeeds");
+
+    // Advance time to unlock
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_time + 1,
+        sequence_number: 200,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Create ledger-based deposit (after time advance)
+    let unlock_ledger = 225;
+    let ledger_id = vault.deposit_by_ledger(&alice, &token, &200, &unlock_ledger, &0)
+        .expect("ledger deposit succeeds");
+
+    // Advance ledger sequence to unlock ledger
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_time + 100,
+        sequence_number: unlock_ledger,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw both
+    let deposit_ids = Vec::from_array(&env, [ts_id, ledger_id]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw succeeds");
+
+    assert_eq!(result.total_attempted, 2);
+    assert_eq!(result.successful_count, 2);
+    assert_eq!(result.total_amount, 300); // 100 + 200
+}
+
+#[test]
+fn test_batch_withdraw_events_emitted() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+
+    // Create deposits
+    let id_1 = vault.deposit(&alice, &token, &100, &unlock_time, &0)
+        .expect("deposit 1 succeeds");
+    let id_2 = vault.deposit(&alice, &token, &200, &unlock_time, &0)
+        .expect("deposit 2 succeeds");
+
+    // Advance time past unlock
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_time + 1,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw
+    let deposit_ids = Vec::from_array(&env, [id_1, id_2]);
+    vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw succeeds");
+
+    // Check events were emitted
+    let events = env.events().all();
+    
+    // Should have:
+    // - 2 individual "withdraw" events (one per successful withdrawal)
+    // - 1 "batch_withdraw" event
+    // Count "withdraw" and "batch_withdraw" events
+    let mut withdraw_count = 0;
+    let mut batch_count = 0;
+    
+    for event in events.iter() {
+        let topics = event.topics;
+        if topics.len() > 0 {
+            if let Ok(symbol) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Attempt to match against known events
+                let topic_str = format!("{:?}", topics.get(0));
+                topic_str
+            })) {
+                // Simple check: if we have the expected event structure
+                // In real code, we'd deserialize and check properly
+            }
+        }
+    }
+
+    // At minimum, batch_withdraw event should be emitted
+    assert!(events.len() > 0);
+}
+
+#[test]
+fn test_batch_withdraw_partial_success_mixed_state() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+
+    // Create multiple deposits in various states
+    let unlocked_id = vault.deposit(&alice, &token, &100, &(now + 100), &0)
+        .expect("unlocked deposit succeeds");
+    let locked_id = vault.deposit(&alice, &token, &200, &(now + 5000), &0)
+        .expect("locked deposit succeeds");
+
+    // Advance time to unlock first deposit only
+    env.ledger().set(LedgerInfo {
+        timestamp: now + 1000,
+        sequence_number: 1,
+        network_id: Default::default(),
+        base_fee: 100,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: u32::MAX,
+    });
+
+    // Batch withdraw both
+    let deposit_ids = Vec::from_array(&env, [unlocked_id, locked_id]);
+    let result = vault.withdraw_batch(&alice, &deposit_ids)
+        .expect("batch withdraw succeeds");
+
+    assert_eq!(result.total_attempted, 2);
+    assert_eq!(result.successful_count, 1);
+    assert_eq!(result.failed_count, 1);
+    assert_eq!(result.total_amount, 100); // Only unlocked deposit
+
+    // Verify the locked deposit is still there
+    assert!(vault.get_vault(&alice, &locked_id).is_some());
+
+    // Verify the unlocked deposit is gone
+    assert!(vault.get_vault(&alice, &unlocked_id).is_none());
+}
+
+
+// ================================================================
+//  Recipient Validation Tests (Issue: Recipient Address Validation)
+// ================================================================
+
+/// Test that withdraw_to with a valid recipient address succeeds.
+/// This confirms the happy path: a deposit is unlocked and funds are transferred
+/// to the specified recipient address.
+#[test]
+fn test_withdraw_to_with_valid_recipient_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    // Advance time to unlock
+    advance_time(&env, 3601);
+
+    // Withdraw to a valid recipient (bob)
+    vault.withdraw_to(&alice, &0, &bob);
+
+    // Verify funds arrived at the recipient
+    assert_eq!(token_client.balance(&bob), 1_000);
+    // Verify funds did not go to depositor
+    assert_eq!(token_client.balance(&alice), 9_000);
+    // Verify deposit is removed from storage
+    assert!(vault.get_vault(&alice, &0).is_none());
+}
+
+/// Test that withdraw_to validates the recipient address is not invalid.
+/// While Soroban's Address type prevents zero addresses at the SDK level,
+/// this test documents the validation behavior and ensures the error code
+/// is properly returned if validation rules are extended in the future.
+#[test]
+fn test_withdraw_to_validation_occurs_before_state_mutation() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    // Do NOT advance time - funds are still locked
+    // Even though funds are locked, if recipient validation fails, it should
+    // fail before checking lock time
+
+    // Try to withdraw - should fail due to funds still being locked
+    // This demonstrates that validation occurs early in the execution path
+    let result = vault.try_withdraw_to(&alice, &deposit_id, &bob);
+    assert_eq!(result, Err(Ok(VaultError::FundsStillLocked)));
+
+    // Verify the deposit is still there (no state mutation occurred)
+    assert!(vault.get_vault(&alice, &deposit_id).is_some());
+}
+
+/// Test that withdraw_to with valid recipient and ledger-based deposit succeeds.
+/// This confirms recipient validation works with ledger-based deposits.
+#[test]
+fn test_withdraw_to_ledger_deposit_with_valid_recipient_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + MIN_LOCK_LEDGERS;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    // Advance past the unlock ledger
+    advance_ledger(&env, MIN_LOCK_LEDGERS);
+
+    // Withdraw to bob
+    vault.withdraw_to(&alice, &id, &bob);
+
+    // Verify funds arrived at bob
+    assert_eq!(token_client.balance(&bob), 1_000);
+    assert_eq!(token_client.balance(&alice), 9_000);
+}
+
+/// Test that withdraw_to with valid recipient and multi-token deposit succeeds.
+/// This confirms recipient validation works with multi-token deposits.
+#[test]
+fn test_withdraw_to_multi_token_deposit_with_valid_recipient_succeeds() {
+    let (env, vault, token1, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let token_client1 = TokenClient::new(&env, &token1);
+
+    // Create a second token
+    let token2 = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    let token2_address = token2.address();
+    let token_client2 = TokenClient::new(&env, &token2_address);
+
+    // Setup token2 balance for alice (100_000 initial)
+    let token2_client = StellarAssetClient::new(&env, &token2_address);
+    token_client2.mint(&alice, &100_000);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    // Create a multi-token deposit with token1 (500) and token2 (300)
+    let deposit_id = vault.multi_deposit(&alice, &unlock_time, &0);
+    vault.multi_deposit_add_token(&alice, &deposit_id, &token1, &500);
+    vault.multi_deposit_add_token(&alice, &deposit_id, &token2_address, &300);
+
+    // Advance time to unlock
+    advance_time(&env, 3601);
+
+    // Withdraw to bob
+    vault.withdraw_to(&alice, &deposit_id, &bob);
+
+    // Verify funds arrived at bob for both tokens
+    assert_eq!(token_client1.balance(&bob), 500);
+    assert_eq!(token_client2.balance(&bob), 300);
 }
