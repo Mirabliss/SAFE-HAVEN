@@ -241,6 +241,16 @@ pub fn withdraw_to(
     env.events().publish(topics, (recipient.clone(), amount));
 }
 
+
+pub fn mev_commit_submitted(env: &Env, depositor: &Address, deposit_id: u32) {
+    let topics = (Symbol::new(env, "mev_commit"), depositor.clone());
+    env.events().publish(topics, deposit_id);
+}
+
+pub fn mev_reveal_completed(env: &Env, depositor: &Address, deposit_id: u32) {
+    let topics = (Symbol::new(env, "mev_reveal"), depositor.clone());
+    env.events().publish(topics, deposit_id);
+}
 /// Emitted when the withdrawal whitelist is set for a deposit (issue #331).
 pub fn whitelist_set(
     env: &Env,

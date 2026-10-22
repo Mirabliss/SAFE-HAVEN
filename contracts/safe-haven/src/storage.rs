@@ -1,5 +1,7 @@
 use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
+use crate::types::{VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
+use soroban_sdk::{Env, Bytes};
 use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS, SustainabilityMetrics};
 use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, SessionKeyEntry, MAX_LOCK_DURATION_SECS};
 use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
@@ -1700,4 +1702,42 @@ pub fn drain_staker_pool(env: &Env, token: &Address) -> i128 {
         env.storage().persistent().remove(&key);
     }
     balance
+}
+
+
+// ----------------------------------------------------------------
+//  MEV Protection: Commit-Reveal Scheme
+// ----------------------------------------------------------------
+
+/// Store a commit hash for a (depositor, deposit_id) pair.
+/// The commit is stored with a TTL window of MEV_COMMIT_WINDOW_SECS (30 minutes)
+/// to allow time for the reveal phase.
+pub fn set_mev_commit(env: &Env, depositor: &Address, deposit_id: u32, commit: &Bytes) {
+    use crate::types::MEV_COMMIT_WINDOW_SECS;
+    
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, commit);
+    
+    // TTL for commit: 30 minutes (MEV reveal window)
+    // Convert seconds to ledgers (5 seconds per ledger)
+    let commit_ttl_ledgers = ((MEV_COMMIT_WINDOW_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
+    let commit_ttl_threshold = commit_ttl_ledgers / 2;
+    
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, commit_ttl_threshold, commit_ttl_ledgers);
+}
+
+/// Retrieve a stored commit hash for a (depositor, deposit_id) pair.
+/// Returns None if no commit exists for this pair.
+pub fn get_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<Bytes> {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Delete a commit hash after successful reveal.
+/// Prevents replay attacks and cleans up storage.
+pub fn remove_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    env.storage().persistent().remove(&key);
 }
