@@ -3786,6 +3786,8 @@ impl SafeHaven {
     /// This is a read-only query that does not modify contract state.
     pub fn get_rewards_pool_total(env: Env) -> i128 {
         storage::get_rewards_pool(&env)
+    }
+
     pub fn get_circuit_breaker_history(env: Env) -> Vec<CircuitBreakerActivation> {
         storage::get_circuit_breaker_history(&env)
     }
