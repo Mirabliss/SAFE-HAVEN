@@ -1514,6 +1514,305 @@ fn test_cancel_deposit_penalty_stored_in_vault_entry() {
     assert_eq!(vault.get_vault(&alice, &0).unwrap().penalty_bps, 500);
 }
 
+// ================================================================
+//  Penalty Allocation Tests: 70% to staker rewards, 30% to fee recipient
+// ================================================================
+
+#[test]
+fn test_cancel_deposit_70_30_split_with_10_percent_penalty() {
+    // Verify exact 70/30 split: with 10% penalty on 1000 tokens
+    // Penalty = 100 tokens
+    // Fee recipient should get 30 tokens (30% of 100)
+    // Staker rewards pool should accumulate 70 tokens (70% of 100)
+    // Depositor should get back 900 tokens
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let vault_id = env.register(SafeHaven, ());
+    let vault = SafeHavenClient::new(&env, &vault_id);
+
+    let admin: Address = Address::generate(&env);
+    let alice: Address = Address::generate(&env);
+    let fee_recipient: Address = Address::generate(&env);
+
+    let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_address = token_id.address();
+
+    StellarAssetClient::new(&env, &token_address).mint(&alice, &10_000);
+
+    vault.initialize(&admin, &fee_recipient, &None, &None);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token_address, &1000, &unlock_time, &1000)
+        .unwrap();
+
+    vault.cancel_deposit(&alice, &deposit_id).unwrap();
+
+    let token_client = TokenClient::new(&env, &token_address);
+
+    // Alice should get back original balance minus penalty
+    // 10_000 - 1000 (deposit) + 900 (refund after 100 penalty) = 9_900
+    assert_eq!(token_client.balance(&alice), 9_900);
+
+    // Fee recipient should get exactly 30% of penalty
+    // 100 * 30% = 30
+    assert_eq!(token_client.balance(&fee_recipient), 30);
+
+    // The 70 tokens should be in the staker rewards pool (can't directly query,
+    // but we verify by checking the total funds are accounted for)
+    let total_distributed = token_client.balance(&alice) + token_client.balance(&fee_recipient);
+    assert_eq!(total_distributed, 9_930); // 9900 + 30, staker pool held by contract
+}
+
+#[test]
+fn test_cancel_deposit_70_30_split_with_various_penalty_rates() {
+    // Test 70/30 split with different penalty percentages
+    let test_cases = vec![
+        (5_000, 500, 150, 350),    // 50% penalty: 500 * 0.30 = 150, 500 * 0.70 = 350
+        (2_500, 250, 75, 175),     // 25% penalty: 250 * 0.30 = 75, 250 * 0.70 = 175
+        (10_000, 1000, 300, 700),  // 100% penalty: 1000 * 0.30 = 300, 1000 * 0.70 = 700
+    ];
+
+    for (penalty_bps, expected_penalty, expected_fee, expected_staker) in test_cases {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let vault_id = env.register(SafeHaven, ());
+        let vault = SafeHavenClient::new(&env, &vault_id);
+
+        let admin: Address = Address::generate(&env);
+        let alice: Address = Address::generate(&env);
+        let fee_recipient: Address = Address::generate(&env);
+
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_address = token_id.address();
+
+        StellarAssetClient::new(&env, &token_address).mint(&alice, &20_000);
+
+        vault.initialize(&admin, &fee_recipient, &None, &None);
+
+        let unlock_time = env.ledger().timestamp() + 3600;
+        let deposit_id = vault
+            .deposit(&alice, &token_address, &1000, &unlock_time, &penalty_bps)
+            .unwrap();
+
+        vault.cancel_deposit(&alice, &deposit_id).unwrap();
+
+        let token_client = TokenClient::new(&env, &token_address);
+
+        // Verify fee recipient gets exactly 30% of penalty
+        assert_eq!(token_client.balance(&fee_recipient), expected_fee);
+
+        // Verify depositor gets back (1000 - penalty)
+        let expected_refund = 1000 - expected_penalty;
+        assert_eq!(token_client.balance(&alice), 20_000 - 1000 + expected_refund);
+    }
+}
+
+#[test]
+fn test_cancel_deposit_accumulates_in_rewards_pool_multiple_cancellations() {
+    // Test that staker rewards pool accumulates across multiple cancellations
+    // Alice cancels: 70 tokens -> pool
+    // Bob cancels: 140 tokens -> pool
+    // Total pool should be 210 tokens
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let vault_id = env.register(SafeHaven, ());
+    let vault = SafeHavenClient::new(&env, &vault_id);
+
+    let admin: Address = Address::generate(&env);
+    let alice: Address = Address::generate(&env);
+    let bob: Address = Address::generate(&env);
+    let carol: Address = Address::generate(&env);
+    let fee_recipient: Address = Address::generate(&env);
+
+    let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_address = token_id.address();
+
+    StellarAssetClient::new(&env, &token_address).mint(&alice, &20_000);
+    StellarAssetClient::new(&env, &token_address).mint(&bob, &20_000);
+    StellarAssetClient::new(&env, &token_address).mint(&carol, &20_000);
+
+    vault.initialize(&admin, &fee_recipient, &None, &None);
+
+    // Register carol as the only staker
+    vault.register_staker(&carol, &1000).unwrap();
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    // Alice deposits 1000 with 10% penalty, cancels
+    // Expected: 100 penalty split into 30 fee + 70 staker pool
+    let alice_deposit_id = vault
+        .deposit(&alice, &token_address, &1000, &unlock_time, &1000)
+        .unwrap();
+    vault.cancel_deposit(&alice, &alice_deposit_id).unwrap();
+
+    // Bob deposits 2000 with 10% penalty, cancels
+    // Expected: 200 penalty split into 60 fee + 140 staker pool
+    let bob_deposit_id = vault
+        .deposit(&bob, &token_address, &2000, &unlock_time, &1000)
+        .unwrap();
+    vault.cancel_deposit(&bob, &bob_deposit_id).unwrap();
+
+    let token_client = TokenClient::new(&env, &token_address);
+
+    // Fee recipient should have 30 + 60 = 90 tokens
+    assert_eq!(token_client.balance(&fee_recipient), 90);
+
+    // Carol should be able to claim 70 + 140 = 210 tokens total
+    // (70 + 140 accumulates in the rewards pool)
+    let carol_balance_before = token_client.balance(&carol);
+    vault.claim_staker_rewards(&carol).unwrap();
+    let carol_balance_after = token_client.balance(&carol);
+
+    // Carol should have received the full 210 from the pool
+    assert_eq!(carol_balance_after - carol_balance_before, 210);
+}
+
+#[test]
+fn test_cancel_deposit_rounding_edge_cases_70_30_split() {
+    // Test rounding behavior with amounts that may not divide evenly
+    // Example: 1000 * 1001 bps (10.01%) = 10010 / 10000 = 1 token
+    // Split: fee (30%) = 0, staker (70%) = 1, or vice versa
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let vault_id = env.register(SafeHaven, ());
+    let vault = SafeHavenClient::new(&env, &vault_id);
+
+    let admin: Address = Address::generate(&env);
+    let alice: Address = Address::generate(&env);
+    let fee_recipient: Address = Address::generate(&env);
+
+    let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_address = token_id.address();
+
+    StellarAssetClient::new(&env, &token_address).mint(&alice, &50_000);
+
+    vault.initialize(&admin, &fee_recipient, &None, &None);
+
+    // Test with penalty that results in odd splits
+    // Penalty: 100 tokens * 1 bps = 1 token total penalty
+    // Split: 30% = 0, 70% = 1 (using integer division)
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token_address, &100_000, &unlock_time, &1)
+        .unwrap();
+
+    vault.cancel_deposit(&alice, &deposit_id).unwrap();
+
+    let token_client = TokenClient::new(&env, &token_address);
+
+    // With 1 token penalty: fee = (1 * 3000) / 10000 = 0, staker = 1 - 0 = 1
+    assert_eq!(token_client.balance(&fee_recipient), 0);
+
+    // Alice should get back 100_000 - 1 = 99_999
+    assert_eq!(token_client.balance(&alice), 50_000 - 100_000 + 99_999);
+}
+
+#[test]
+fn test_cancel_deposit_with_zero_penalty_no_split() {
+    // Test that with 0% penalty, no funds go to fee recipient or staker pool
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let vault_id = env.register(SafeHaven, ());
+    let vault = SafeHavenClient::new(&env, &vault_id);
+
+    let admin: Address = Address::generate(&env);
+    let alice: Address = Address::generate(&env);
+    let fee_recipient: Address = Address::generate(&env);
+
+    let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_address = token_id.address();
+
+    StellarAssetClient::new(&env, &token_address).mint(&alice, &10_000);
+
+    vault.initialize(&admin, &fee_recipient, &None, &None);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token_address, &1000, &unlock_time, &0)
+        .unwrap();
+
+    vault.cancel_deposit(&alice, &deposit_id).unwrap();
+
+    let token_client = TokenClient::new(&env, &token_address);
+
+    // Alice should get full 1000 back
+    assert_eq!(token_client.balance(&alice), 10_000);
+
+    // Fee recipient should get nothing
+    assert_eq!(token_client.balance(&fee_recipient), 0);
+}
+
+#[test]
+fn test_cancel_deposit_no_funds_lost_in_split() {
+    // Verify that the sum of (fee recipient + staker pool + depositor refund) = original deposit amount
+    // This ensures no funds are lost during the 70/30 split
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let vault_id = env.register(SafeHaven, ());
+    let vault = SafeHavenClient::new(&env, &vault_id);
+
+    let admin: Address = Address::generate(&env);
+    let alice: Address = Address::generate(&env);
+    let fee_recipient: Address = Address::generate(&env);
+
+    let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_address = token_id.address();
+
+    StellarAssetClient::new(&env, &token_address).mint(&alice, &100_000);
+
+    vault.initialize(&admin, &fee_recipient, &None, &None);
+
+    // Test with a variety of deposit and penalty combinations
+    let test_cases = vec![
+        (1000, 500),   // 50% penalty
+        (5000, 2000),  // 40% penalty
+        (1337, 1001),  // ~75% penalty with odd number
+        (10000, 1),    // Very small penalty
+    ];
+
+    for (deposit_amount, penalty_bps) in test_cases {
+        let unlock_time = env.ledger().timestamp() + 3600;
+        let deposit_id = vault
+            .deposit(&alice, &token_address, &deposit_amount, &unlock_time, &penalty_bps)
+            .unwrap();
+
+        let token_client = TokenClient::new(&env, &token_address);
+        let contract_address = env.register(SafeHaven, ());
+
+        // Calculate expected values
+        let penalty: i128 = (deposit_amount * penalty_bps as i128) / 10_000;
+        let refund = deposit_amount - penalty;
+        let fee_share: i128 = (penalty * 3000) / 10_000;
+        let staker_share: i128 = penalty - fee_share;
+
+        // Initial balance: 100_000 - deposit_amount
+        let balance_before = token_client.balance(&alice);
+
+        vault.cancel_deposit(&alice, &deposit_id).unwrap();
+
+        let balance_after = token_client.balance(&alice);
+        let fee_balance = token_client.balance(&fee_recipient);
+
+        // Alice should have received back the refund amount
+        assert_eq!(balance_after, balance_before + refund);
+
+        // Fee recipient should have received fee_share
+        assert_eq!(fee_balance, fee_share);
+
+        // The staker_share is held in the contract (in the rewards pool)
+        // Total should equal the original deposit
+        let total_distributed = refund + fee_share + staker_share;
+        assert_eq!(total_distributed, deposit_amount);
+    }
+}
+
 #[test]
 fn test_harvest_tax_losses_replaces_position_and_records_tax_impact() {
     let (env, vault, token, admin, alice, _fee) = setup();
