@@ -548,6 +548,85 @@ mod prediction_market_tests {
         assert_eq!(market.status, MarketStatus::Closed);
     }
 
+    #[test]
+    fn test_market_status_valid_resolution_path() {
+        let (env, client, _token, _admin, alice, _fee, oracle) = setup();
+        let market_id = create_test_market(&env, &client, &alice, &oracle);
+
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Open
+        );
+
+        client.close_prediction_market(&oracle, &market_id);
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Closed
+        );
+
+        client.resolve_prediction_market(&oracle, &market_id, &0, &None);
+        assert_eq!(
+            client.get_prediction_market(&market_id).unwrap().status,
+            MarketStatus::Resolved
+        );
+    }
+
+    #[test]
+    fn test_market_status_valid_cancellation_paths() {
+        let (env, client, token, admin, alice, _fee, oracle) = setup();
+        let open_market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.cancel_prediction_market(&admin, &open_market_id, &token);
+        assert_eq!(
+            client.get_prediction_market(&open_market_id).unwrap().status,
+            MarketStatus::Cancelled
+        );
+
+        let closed_market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &closed_market_id);
+        client.cancel_prediction_market(&admin, &closed_market_id, &token);
+        assert_eq!(
+            client.get_prediction_market(&closed_market_id).unwrap().status,
+            MarketStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn test_market_status_rejects_invalid_transitions() {
+        let (env, client, token, admin, alice, _fee, oracle) = setup();
+        let resolved_market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.close_prediction_market(&oracle, &resolved_market_id);
+        client.resolve_prediction_market(&oracle, &resolved_market_id, &0, &None);
+
+        assert_eq!(
+            client.close_prediction_market(&oracle, &resolved_market_id),
+            Err(Ok(PredictionMarketError::InvalidMarketStatus))
+        );
+        assert_eq!(
+            client.cancel_prediction_market(&admin, &resolved_market_id, &token),
+            Err(Ok(PredictionMarketError::MarketAlreadyResolved))
+        );
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &resolved_market_id, &0, &None),
+            Err(Ok(PredictionMarketError::MarketNotClosedYet))
+        );
+
+        let cancelled_market_id = create_test_market(&env, &client, &alice, &oracle);
+        client.cancel_prediction_market(&admin, &cancelled_market_id, &token);
+
+        assert_eq!(
+            client.close_prediction_market(&oracle, &cancelled_market_id),
+            Err(Ok(PredictionMarketError::InvalidMarketStatus))
+        );
+        assert_eq!(
+            client.cancel_prediction_market(&admin, &cancelled_market_id, &token),
+            Err(Ok(PredictionMarketError::InvalidMarketStatus))
+        );
+        assert_eq!(
+            client.resolve_prediction_market(&oracle, &cancelled_market_id, &0, &None),
+            Err(Ok(PredictionMarketError::MarketNotClosedYet))
+        );
+    }
+
     /// Full lifecycle: create → close → resolve with data → query confirms data.
     #[test]
     fn test_full_lifecycle_resolution_data_stored() {
