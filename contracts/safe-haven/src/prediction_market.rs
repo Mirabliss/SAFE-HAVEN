@@ -22,6 +22,11 @@ pub fn initialize_markets(
 ) -> Result<(), PredictionMarketError> {
     admin.require_auth();
 
+    // Prevent re-initialization
+    if storage::is_pm_initialized(env) {
+        return Err(PredictionMarketError::AlreadyInitialized);
+    }
+
     // Validate fee
     if default_fee_bps > MAX_FEE_BPS {
         return Err(PredictionMarketError::InvalidFeeBps);
@@ -37,6 +42,7 @@ pub fn initialize_markets(
     };
 
     storage::set_market_config(env, &config);
+    storage::set_pm_initialized(env);
     Ok(())
 }
 
