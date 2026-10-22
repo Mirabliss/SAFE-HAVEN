@@ -335,6 +335,18 @@ pub fn batch_withdraw(
     );
 }
 
+/// Emitted when a staker registers or updates their stake.
+pub fn staker_registered(env: &Env, staker: &Address, amount: i128) {
+    let topics = (Symbol::new(env, "StakerRegistered"), staker.clone());
+    env.events()
+        .publish(topics, (amount, env.ledger().timestamp()));
+}
+
+/// Emitted when a staker successfully claims rewards.
+pub fn rewards_claimed(env: &Env, staker: &Address, amount: i128) {
+    let topics = (Symbol::new(env, "RewardsClaimed"), staker.clone());
+    env.events()
+        .publish(topics, (amount, env.ledger().timestamp()));
 
 /// Emitted when a depositor achieves a sustainability milestone
 /// (carbon_neutral, high_renewable, carbon_negative, or large_offset).

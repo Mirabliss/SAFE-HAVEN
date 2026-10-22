@@ -66,7 +66,7 @@ extern crate std;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, BytesN, Env, String, Vec,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 use crate::{
@@ -4769,6 +4769,23 @@ fn test_multiple_stakers_register() {
 }
 
 #[test]
+fn test_zero_stake_removal_does_not_leave_claimable_stake() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    vault.register_staker(&alice, &1).unwrap();
+
+    crate::storage::set_staker(&env, &alice, 0);
+    crate::storage::set_total_staked(&env, 0);
+    env.storage()
+        .persistent()
+        .remove(&VaultKey::Staker(alice.clone()));
+
+    let result = vault.claim_staker_rewards(&alice);
+    assert_eq!(result, Err(VaultError::StakerNotFound));
+}
+
+#[test]
+fn test_claim_staker_rewards_requires_registration() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
 fn test_staker_pagination_with_more_than_one_hundred_stakers() {
     let env = Env::default();
     env.mock_all_auths();
@@ -4942,15 +4959,117 @@ fn test_multiple_stakers_proportional_rewards() {
 }
 
 #[test]
+fn test_multiple_staker_claims_consume_shared_pool_without_overdraft() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let carol: Address = Address::generate(&env);
+
+    vault.register_staker(&alice, &1).unwrap();
+    vault.register_staker(&bob, &2).unwrap();
+    vault.register_staker(&carol, &3).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &101_i128);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+    vault.claim_staker_rewards(&bob).unwrap();
+    vault.claim_staker_rewards(&carol).unwrap();
+
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        16
+    );
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &bob),
+        28
+    );
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &carol),
+        28
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 29);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        20
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 25);
+}
+
+#[test]
+fn test_claim_fails_when_pool_cannot_yield_one_unit() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    vault.register_staker(&alice, &1).unwrap();
+    vault.register_staker(&bob, &1).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &1_i128);
+
+    let result = vault.claim_staker_rewards(&alice);
+    assert_eq!(result, Err(VaultError::NoRewardsToClaim));
+    assert_eq!(crate::storage::get_rewards_pool(&env), 1);
+}
+
+#[test]
+fn test_staker_claim_with_only_one_unit_in_rewards_pool() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    vault.register_staker(&alice, &1).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &1_i128);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        1
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 0);
+    assert_eq!(
+        vault.claim_staker_rewards(&alice),
+        Err(VaultError::NoRewardsToClaim)
+    );
+}
+
+#[test]
+fn test_staker_claim_with_stake_near_i128_max() {
+    let (env, vault, _token, _admin, alice, _fee) = setup();
+    let stake = i128::MAX - 1;
+    vault.register_staker(&alice, &stake).unwrap();
+    env.storage()
+        .persistent()
+        .set(&VaultKey::RewardsPool, &1_i128);
+
+    vault.claim_staker_rewards(&alice).unwrap();
+
+    assert_eq!(crate::storage::get_total_staked(&env), stake);
+    assert_eq!(
+        crate::storage::get_staker_rewards_claimed(&env, &alice),
+        1
+    );
+    assert_eq!(crate::storage::get_rewards_pool(&env), 0);
+}
+
+#[test]
 fn test_staker_registration_emits_event() {
     let (env, vault, _token, _admin, alice, _fee) = setup();
 
-    let staker_addr = alice.clone();
-    vault.register_staker(&staker_addr, &1000).unwrap();
+    let timestamp = env.ledger().timestamp();
+    vault.register_staker(&alice, &1000).unwrap();
 
-    // Check for staker_registered event
     let events = env.events().all();
-    assert!(events.len() > 0);
+    let (_, event) = events
+        .iter()
+        .find(|(_, event)| {
+            event.topics.len() == 2
+                && event.topics.get(0) == Symbol::new(&env, "StakerRegistered").into_val(&env)
+                && event.topics.get(1) == alice.clone().into_val(&env)
+        })
+        .expect("staker registration event should be emitted and filterable by address");
+
+    assert_eq!(event.data, (1000_i128, timestamp).into_val(&env));
 }
 
 #[test]
@@ -4981,11 +5100,22 @@ fn test_staker_rewards_claimed_emits_event() {
         .unwrap();
     vault.cancel_deposit(&alice, &deposit_id).unwrap();
 
-    // Claim rewards — should emit event
+    let timestamp = env.ledger().timestamp();
+
+    // Claim rewards — should emit an address-filterable event with the claimed amount and timestamp.
     vault.claim_staker_rewards(&alice).unwrap();
 
     let events = env.events().all();
-    assert!(events.len() > 0); // Should have reward claim event
+    let (_, event) = events
+        .iter()
+        .find(|(_, event)| {
+            event.topics.len() == 2
+                && event.topics.get(0) == Symbol::new(&env, "RewardsClaimed").into_val(&env)
+                && event.topics.get(1) == alice.clone().into_val(&env)
+        })
+        .expect("rewards claimed event should be emitted and filterable by staker address");
+
+    assert_eq!(event.data, (70_i128, timestamp).into_val(&env));
 }
 
 #[test]
