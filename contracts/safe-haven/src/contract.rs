@@ -20,7 +20,7 @@ use crate::{
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, InsuranceClaim, ClaimStatus,
         SessionKeyEntry, STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, MEVCommitment, MEVDetection, MEVStatus,
-        PriceSample, SustainabilityMetrics, BatchWithdrawalResult, WithdrawalResult,
+        PriceSample, SustainabilityMetrics, SustainabilityReport, BatchWithdrawalResult, WithdrawalResult,
     },
     prediction_market,
     prediction_market_errors::PredictionMarketError,
@@ -696,6 +696,7 @@ impl SafeHaven {
         amount: i128,
         unlock_time: u64,
         penalty_bps: u32,
+        renewable_energy_percent: Option<u32>,
     ) -> Result<u32, VaultError> {
         depositor.require_auth();
         storage::require_permission(&env, &depositor, PermissionType::Deposit)?;
@@ -729,6 +730,16 @@ impl SafeHaven {
         if penalty_bps > 0 && storage::get_fee_recipient(&env).is_none() {
             return Err(VaultError::MissingFeeRecipient);
         }
+
+        // Validate renewable energy percentage if provided (must be 0-100)
+        let renewable_pct = if let Some(pct) = renewable_energy_percent {
+            if pct > 100 {
+                return Err(VaultError::InvalidRenewableEnergyPercent);
+            }
+            pct
+        } else {
+            crate::constants::RENEWABLE_ENERGY_BASELINE
+        };
 
         let now = env.ledger().timestamp();
         if unlock_time <= now {
@@ -782,7 +793,7 @@ impl SafeHaven {
             deposit_id,
             depositor: depositor.clone(),
             carbon_footprint,
-            renewable_energy_percent: crate::constants::RENEWABLE_ENERGY_BASELINE,
+            renewable_energy_percent: renewable_pct,
             carbon_offset_grams: carbon_offset,
             timestamp: now,
         };
@@ -895,6 +906,7 @@ impl SafeHaven {
         amount: i128,
         unlock_time: u64,
         penalty_bps: u32,
+        renewable_energy_percent: Option<u32>,
     ) -> Result<u32, VaultError> {
         payer.require_auth();
         storage::require_permission(&env, &payer, PermissionType::Deposit)?;
@@ -924,6 +936,16 @@ impl SafeHaven {
         if penalty_bps > 0 && storage::get_fee_recipient(&env).is_none() {
             return Err(VaultError::MissingFeeRecipient);
         }
+
+        // Validate renewable energy percentage if provided (must be 0-100)
+        let renewable_pct = if let Some(pct) = renewable_energy_percent {
+            if pct > 100 {
+                return Err(VaultError::InvalidRenewableEnergyPercent);
+            }
+            pct
+        } else {
+            crate::constants::RENEWABLE_ENERGY_BASELINE
+        };
 
         let now = env.ledger().timestamp();
         if unlock_time <= now {
@@ -977,7 +999,7 @@ impl SafeHaven {
             deposit_id,
             depositor: depositor.clone(),
             carbon_footprint,
-            renewable_energy_percent: crate::constants::RENEWABLE_ENERGY_BASELINE,
+            renewable_energy_percent: renewable_pct,
             carbon_offset_grams: carbon_offset,
             timestamp: now,
         };
@@ -1084,6 +1106,7 @@ impl SafeHaven {
         amount: i128,
         unlock_ledger: u32,
         penalty_bps: u32,
+        renewable_energy_percent: Option<u32>,
     ) -> Result<u32, VaultError> {
         depositor.require_auth();
         storage::require_permission(&env, &depositor, PermissionType::Deposit)?;
@@ -1113,6 +1136,16 @@ impl SafeHaven {
         if penalty_bps > 0 && storage::get_fee_recipient(&env).is_none() {
             return Err(VaultError::MissingFeeRecipient);
         }
+
+        // Validate renewable energy percentage if provided (must be 0-100)
+        let renewable_pct = if let Some(pct) = renewable_energy_percent {
+            if pct > 100 {
+                return Err(VaultError::InvalidRenewableEnergyPercent);
+            }
+            pct
+        } else {
+            crate::constants::RENEWABLE_ENERGY_BASELINE
+        };
 
         let current_ledger = env.ledger().sequence();
         if unlock_ledger <= current_ledger {
@@ -1153,7 +1186,7 @@ impl SafeHaven {
             deposit_id,
             depositor: depositor.clone(),
             carbon_footprint,
-            renewable_energy_percent: crate::constants::RENEWABLE_ENERGY_BASELINE,
+            renewable_energy_percent: renewable_pct,
             carbon_offset_grams: carbon_offset,
             timestamp: env.ledger().timestamp(),
         };
@@ -3539,6 +3572,52 @@ impl SafeHaven {
         storage::get_deposit_readonly(&env, &depositor, deposit_id)
             .and_then(|entry| calculate_interest(&entry, env.ledger().timestamp()).ok())
             .unwrap_or(0)
+    }
+
+    /// Get sustainability metrics for a specific deposit.
+    /// Returns the carbon footprint, renewable energy percentage, and carbon offset for a deposit.
+    pub fn get_sustainability_metrics(
+        env: Env,
+        depositor: Address,
+        deposit_id: u32,
+    ) -> Option<SustainabilityMetrics> {
+        storage::get_sustainability_metrics_readonly(&env, &depositor, deposit_id)
+    }
+
+    /// Generate a sustainability report aggregated across all deposits for a depositor.
+    /// Returns total carbon footprint, average renewable energy percentage, total offset, and deposit count.
+    pub fn generate_sustainability_report(
+        env: Env,
+        depositor: Address,
+    ) -> SustainabilityReport {
+        let deposit_ids = storage::get_deposit_ids(&env, &depositor);
+        let mut total_carbon: i128 = 0;
+        let mut total_offset: i128 = 0;
+        let mut total_renewable: u64 = 0;
+        
+        for id in deposit_ids.iter() {
+            if let Some(metrics) = storage::get_sustainability_metrics_readonly(&env, &depositor, id) {
+                total_carbon = total_carbon.saturating_add(metrics.carbon_footprint);
+                total_offset = total_offset.saturating_add(metrics.carbon_offset_grams);
+                total_renewable = total_renewable.saturating_add(metrics.renewable_energy_percent as u64);
+            }
+        }
+        
+        let deposit_count = deposit_ids.len() as u32;
+        let average_renewable = if deposit_count > 0 {
+            ((total_renewable / deposit_ids.len() as u64) as u32).min(100)
+        } else {
+            0
+        };
+        
+        SustainabilityReport {
+            depositor,
+            total_carbon_footprint: total_carbon,
+            average_renewable_energy_percent: average_renewable,
+            total_carbon_offset: total_offset,
+            active_deposit_count: deposit_count,
+            report_timestamp: env.ledger().timestamp(),
+        }
     }
 
     pub fn get_admin(env: Env) -> Option<Address> {

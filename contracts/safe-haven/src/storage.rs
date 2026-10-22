@@ -1,5 +1,6 @@
 use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
+use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS, SustainabilityMetrics};
 use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, SessionKeyEntry, MAX_LOCK_DURATION_SECS};
 use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
 use crate::types::CircuitBreakerActivation;
