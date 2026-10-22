@@ -50,6 +50,7 @@ pub use prediction_market_errors::PredictionMarketError;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
 
 #[cfg(test)]
 mod smart_wallet_tests;
