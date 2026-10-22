@@ -1,6 +1,16 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 
 pub const MAX_DEPOSIT_AMOUNT: i128 = 1_000_000_000_000_000;
+/// Re-export of MAX_LOCK_DURATION_SECS for use in tests and public API.
+///
+/// Defined in constants.rs but re-exported here for compatibility with existing
+/// test imports (test code historically imported from types.rs).
+///
+/// **Value**: 157,788,000 seconds = exactly 5 years.
+///
+/// This constant enforces the maximum lock duration across all deposit types
+/// (`deposit`, `deposit_for`, `deposit_by_ledger`, etc.) and is used by
+/// tests to verify boundary conditions at 5 years and 5 years + 1 second.
 pub const MAX_LOCK_DURATION_SECS: u64 = 157_788_000;
 pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 
@@ -8,6 +18,9 @@ pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 pub const MAX_TOKENS_PER_DEPOSIT: u32 = 5;
 /// Emergency withdrawals at or above this cumulative amount in one ledger trip the circuit breaker.
 pub const MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER: i128 = 100_000_000;
+
+/// Maximum duration for a session key (default: 30 days in seconds).
+pub const MAX_SESSION_KEY_DURATION_SECS: u64 = 2_592_000;
 
 /// Current storage schema version. Bump this constant when the on-chain
 /// layout of a `contracttype` struct changes so `migrate()` can detect
@@ -69,6 +82,11 @@ pub enum VaultKey {
     /// Persists the schema version written by the last `migrate()` call (or 1
     /// for contracts that were initialized before versioning was introduced).
     StorageVersion,
+    /// Accumulated staker-pool balance for `token`.
+    /// On `cancel_deposit` 70 % of the penalty is added here; on
+    /// `claim_staker_pool` the full balance for that token is transferred to
+    /// the caller and this key is cleared.
+    StakerPool(Address),
     /// Guards flash-loan execution against re-entrant nested calls.
     FlashLoanGuard,
     /// Active borrower state for a single-token flash loan.
@@ -87,6 +105,23 @@ pub enum VaultKey {
     RewardsPool,
     /// Rewards claimed by a staker (track cumulative for auditing)
     StakerRewardsClaimed(Address),
+    /// Insurance claim entry (issue #334)
+    InsuranceClaim(u32),
+    /// Counter for insurance claim IDs (issue #334)
+    ClaimCounter,
+    /// Insurance pool balance per token (issue #334)
+    InsurancePool(Address),
+    /// Session key entry: maps (delegator, session_key_id) to SessionKeyEntry
+    SessionKey(Address, u32),
+    /// Session key counter for a delegator (incremented on each create_session_key)
+    SessionKeyCounter(Address),
+    /// Active session key IDs for a delegator (stores Vec<u32>)
+    ActiveSessionKeyIds(Address),
+    /// Sustainability timing and totals keyed by depositor.
+    SustainabilityMetrics(Address, u32),
+    TotalCarbonFootprint(Address),
+    TotalCarbonOffset(Address),
+    MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
 }
@@ -131,6 +166,28 @@ pub struct LedgerVaultEntry {
     pub penalty_bps: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityMetrics {
+    pub deposit_id: u32,
+    pub depositor: Address,
+    pub carbon_footprint: i128,
+    pub renewable_energy_percent: u32,
+    pub carbon_offset_grams: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SustainabilityReport {
+    pub depositor: Address,
+    pub total_carbon_footprint: i128,
+    pub average_renewable_energy_percent: u32,
+    pub total_carbon_offset: i128,
+    pub active_deposit_count: u32,
+    pub report_timestamp: u64,
+}
+
 /// A single token+amount pair used in multi-token deposits (issue #330).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,6 +223,8 @@ pub enum DepositType {
     MultiToken,
 }
 
+pub const MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER: i128 = 1_000_000;
+
 /// Paginated query result for depositor addresses.
 /// (Soroban `#[contracttype]` does not support generics.)
 #[contracttype]
@@ -185,9 +244,56 @@ pub struct StakerEntry {
     pub stake_amount: i128,
 }
 
+/// Status of an insurance claim (for issue #334)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaimStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+/// Insurance claim record (for issue #334)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsuranceClaim {
+    pub claim_id: u32,
+    pub claimant: Address,
+    pub token: Address,
+    pub amount_requested: i128,
+    pub incident_evidence: String,
+    pub status: ClaimStatus,
 /// Sponsorship fund configuration and state
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DepositType {
+    /// Timestamp-based (`VaultEntry`) single-token deposit.
+    TimeBased,
+    /// Ledger-sequence-based (`LedgerVaultEntry`) deposit.
+    LedgerBased,
+    /// Multi-token timestamp-based deposit (`MultiTokenVaultEntry`). (issue #330)
+    MultiToken,
+}
+
+/// Session key entry for delegated funding authority.
+/// Allows a delegate to make deposits on behalf of a delegator.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionKeyEntry {
+    /// The delegator who authorized this session key
+    pub delegator: Address,
+    /// The delegate who can use this session key to make deposits
+    pub delegate: Address,
+    /// Maximum amount that can be deposited using this key (0 = unlimited)
+    pub max_amount: i128,
+    /// Expiration timestamp (seconds since epoch)
+    pub expires_at: u64,
+    /// Whether this session key is revoked (permanently disabled)
+    pub is_revoked: bool,
+    /// Total amount already deposited via this session key
+    pub amount_used: i128,
+    /// Timestamp when this session key was created
+    pub created_at: u64,
 pub struct SponsorshipFund {
     /// Balance of native tokens available for sponsorship
     pub balance: i128,
