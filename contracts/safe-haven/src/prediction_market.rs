@@ -446,8 +446,14 @@ pub fn cancel_market(
     let mut market = storage::get_market(env, market_id)
         .ok_or(PredictionMarketError::MarketNotFound)?;
 
-    if market.status == MarketStatus::Resolved {
-        return Err(PredictionMarketError::MarketAlreadyResolved);
+    match market.status {
+        MarketStatus::Open | MarketStatus::Closed => {}
+        MarketStatus::Resolved => {
+            return Err(PredictionMarketError::MarketAlreadyResolved);
+        }
+        MarketStatus::Cancelled => {
+            return Err(PredictionMarketError::InvalidMarketStatus);
+        }
     }
 
     market.status = MarketStatus::Cancelled;
