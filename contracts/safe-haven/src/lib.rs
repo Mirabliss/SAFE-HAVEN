@@ -35,7 +35,7 @@ pub use types::{
     CircuitBreakerActivation, DepositSubscription, DepositType, MultiTokenVaultEntry, Page,
     SubscriptionExecution, SubscriptionStats, TaxLossHarvest, TokenDeposit, STORAGE_VERSION,
     MAX_EMERGENCY_WITHDRAWAL_PER_LEDGER, MAX_TOKENS_PER_DEPOSIT, BatchWithdrawalResult,
-    WithdrawalResult,
+    WithdrawalResult, StakerInfo,
 };
 pub use pq::{ML_DSA_PUBLIC_KEY_BYTES, ML_DSA_SIGNATURE_BYTES};
 
@@ -50,3 +50,9 @@ pub use prediction_market_errors::PredictionMarketError;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+
+#[cfg(test)]
+mod smart_wallet_tests;
+mod test_deposit_id_counter;
+mod prediction_market_test;
