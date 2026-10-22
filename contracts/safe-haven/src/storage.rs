@@ -918,8 +918,23 @@ pub fn get_staker(env: &Env, staker: &Address) -> Option<i128> {
     env.storage().persistent().get(&key)
 }
 
-/// Get staker list (append-only, may contain stale entries after removes).
-fn get_staker_list(env: &Env) -> Vec<Address> {
+/// Record the timestamp when a staker first registers.
+pub fn set_staker_registration_timestamp(env: &Env, staker: &Address, timestamp: u64) {
+    let key = VaultKey::StakerRegistrationTimestamp(staker.clone());
+    env.storage().persistent().set(&key, &timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the timestamp when a staker first registered, if recorded.
+pub fn get_staker_registration_timestamp(env: &Env, staker: &Address) -> Option<u64> {
+    let key = VaultKey::StakerRegistrationTimestamp(staker.clone());
+    env.storage().persistent().get(&key)
+}
+
+/// Get the legacy staker list written before the list was indexed.
+fn get_legacy_staker_list(env: &Env) -> Vec<Address> {
     let key = VaultKey::StakerList;
     env.storage()
         .persistent()
@@ -927,18 +942,15 @@ fn get_staker_list(env: &Env) -> Vec<Address> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Save the staker list.
-fn save_staker_list(env: &Env, stakers: &Vec<Address>) {
-    let key = VaultKey::StakerList;
-    env.storage().persistent().set(&key, stakers);
+fn get_indexed_staker_count(env: &Env) -> u32 {
     env.storage()
         .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+        .get(&VaultKey::StakerCount)
+        .unwrap_or(0)
 }
 
-/// Add a staker to the staker list (O(1) if not already in list).
+/// Add a staker to the append-only list without rewriting the existing list.
 pub fn add_staker_to_list(env: &Env, staker: &Address) {
-    // Check if already in list using StakerInList flag
     let in_list_key = VaultKey::StakerInList(staker.clone());
     if env
         .storage()
@@ -949,12 +961,20 @@ pub fn add_staker_to_list(env: &Env, staker: &Address) {
         return; // Already in list, skip
     }
 
-    // Add to list
-    let mut list = get_staker_list(env);
-    list.push_back(staker.clone());
-    save_staker_list(env, &list);
+    let count_key = VaultKey::StakerCount;
+    let index = get_indexed_staker_count(env);
+    let entry_key = VaultKey::StakerListEntry(index);
+    env.storage().persistent().set(&entry_key, staker);
+    env.storage()
+        .persistent()
+        .extend_ttl(&entry_key, BUMP_THRESHOLD, BUMP_TARGET);
 
-    // Mark as in list
+    let count = index.saturating_add(1);
+    env.storage().persistent().set(&count_key, &count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, BUMP_THRESHOLD, BUMP_TARGET);
+
     env.storage().persistent().set(&in_list_key, &true);
     env.storage()
         .persistent()
@@ -1006,9 +1026,52 @@ pub fn set_staker_rewards_claimed(env: &Env, staker: &Address, amount: i128) {
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
-/// Get the staker list (may contain stale entries). Active check via `get_staker`.
+/// Get a page of stakers in registration order.
+pub fn get_stakers_page(env: &Env, offset: u32, limit: u32) -> (Vec<Address>, u32) {
+    let legacy = get_legacy_staker_list(env);
+    let legacy_count = legacy.len();
+    let indexed_count = get_indexed_staker_count(env);
+    let total_count = legacy_count.saturating_add(indexed_count);
+    let mut page = Vec::new(env);
+
+    if limit == 0 || offset >= total_count {
+        return (page, total_count);
+    }
+
+    let end = offset.saturating_add(limit).min(total_count);
+    for position in offset..end {
+        if position < legacy_count {
+            if let Some(staker) = legacy.get(position) {
+                page.push_back(staker);
+            }
+        } else {
+            let index = position.saturating_sub(legacy_count);
+            if let Some(staker) = env
+                .storage()
+                .persistent()
+                .get::<VaultKey, Address>(&VaultKey::StakerListEntry(index))
+            {
+                page.push_back(staker);
+            }
+        }
+    }
+
+    (page, total_count)
+}
+
+/// Get the complete staker list (may contain stale entries after removals).
 pub fn get_stakers_list(env: &Env) -> Vec<Address> {
-    get_staker_list(env)
+    let mut stakers = get_legacy_staker_list(env);
+    for index in 0..get_indexed_staker_count(env) {
+        if let Some(staker) = env
+            .storage()
+            .persistent()
+            .get::<VaultKey, Address>(&VaultKey::StakerListEntry(index))
+        {
+            stakers.push_back(staker);
+        }
+    }
+    stakers
 }
 
 // ----------------------------------------------------------------

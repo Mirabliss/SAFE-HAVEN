@@ -20,6 +20,8 @@ use crate::{
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, InsuranceClaim, ClaimStatus,
         SessionKeyEntry, STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT,
         STORAGE_VERSION, MAX_TOKENS_PER_DEPOSIT, MEVCommitment, MEVDetection, MEVStatus,
+        PriceSample, SustainabilityMetrics, BatchWithdrawalResult, WithdrawalResult,
+        StakerInfo,
         PriceSample, SustainabilityMetrics, SustainabilityReport, BatchWithdrawalResult, WithdrawalResult,
     },
     prediction_market,
@@ -419,6 +421,7 @@ impl SafeHaven {
         storage::set_admin(&env, &admin);
         storage::set_initialized(&env);
         storage::set_fee_recipient(&env, &fee_recipient);
+        storage::set_rewards_pool(&env, 0);
 
         if let Some(v) = max_deposit {
             if v <= 0 {
@@ -1781,6 +1784,12 @@ impl SafeHaven {
         // Update staker's stake amount
         storage::set_staker(&env, &staker, amount);
 
+        if storage::get_staker_registration_timestamp(&env, &staker).is_none()
+            && old_stake == 0
+        {
+            storage::set_staker_registration_timestamp(&env, &staker, env.ledger().timestamp());
+        }
+
         // Update total staked
         let new_total = current_total - old_stake + amount;
         storage::set_total_staked(&env, new_total);
@@ -1837,6 +1846,33 @@ impl SafeHaven {
 
         events::rewards_claimed(&env, &staker, reward);
         Ok(())
+    }
+
+    /// Return a page of registered stakers and the total number registered.
+    pub fn get_stakers(env: Env, offset: u32, limit: u32) -> Page {
+        let (items, total_count) = storage::get_stakers_page(&env, offset, limit);
+        Page { items, total_count }
+    }
+
+    /// Return a staker's stake, earned and claimed rewards, and registration time.
+    pub fn get_staker_info(env: Env, staker: Address) -> Option<StakerInfo> {
+        let stake_amount = storage::get_staker(&env, &staker)?;
+        let rewards_claimed = storage::get_staker_rewards_claimed(&env, &staker);
+        let rewards_pool = storage::get_rewards_pool(&env);
+        let total_staked = storage::get_total_staked(&env);
+        let currently_earned = if total_staked > 0 && rewards_pool > 0 {
+            stake_amount.saturating_mul(rewards_pool) / total_staked
+        } else {
+            0
+        };
+
+        Some(StakerInfo {
+            stake_amount,
+            rewards_earned: rewards_claimed.saturating_add(currently_earned),
+            rewards_claimed,
+            registration_timestamp: storage::get_staker_registration_timestamp(&env, &staker)
+                .unwrap_or(0),
+        })
     }
 
     // ================================================================

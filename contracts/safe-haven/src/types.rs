@@ -95,6 +95,8 @@ pub enum VaultKey {
     FlashLoanFeeBalance(Address, Address),
     /// Staker entry: maps staker address to their stake amount
     Staker(Address),
+    /// Registration timestamp for a staker.
+    StakerRegistrationTimestamp(Address),
     /// List of all registered stakers
     StakerList,
     /// Flag to track if a staker is in the StakerList (prevents duplicates)
@@ -124,6 +126,10 @@ pub enum VaultKey {
     MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
+    /// Number of stakers stored in the indexed list after the legacy list.
+    StakerCount,
+    /// Staker address at an index after the legacy list.
+    StakerListEntry(u32),
     /// Sustainability metrics for a deposit (depositor, deposit_id) -> SustainabilityMetrics
     SustainabilityMetrics(Address, u32),
     /// Total carbon footprint for a depositor
@@ -258,6 +264,15 @@ pub struct Page {
 pub struct StakerEntry {
     pub staker: Address,
     pub stake_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakerInfo {
+    pub stake_amount: i128,
+    pub rewards_earned: i128,
+    pub rewards_claimed: i128,
+    pub registration_timestamp: u64,
 }
 
 /// Status of an insurance claim (for issue #334)

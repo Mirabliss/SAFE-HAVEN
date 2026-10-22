@@ -311,6 +311,26 @@ vault.register_staker(&alice, &1000)?;
 vault.register_staker(&alice, &2000)?;
 ```
 
+#### `get_stakers(offset, limit) -> Page`
+Return a page of staker addresses in registration order. The result includes `total_count`, which is the number of registered stakers across all pages. Registration uses indexed persistent storage so adding stakers does not rewrite the full list.
+
+```rust
+let page = vault.get_stakers(&0, &25);
+// page.items contains the first 25 addresses; page.total_count reports all stakers.
+```
+
+#### `get_staker_info(staker) -> Option<StakerInfo>`
+Read a staker's stake amount, rewards, and registration timestamp without modifying contract state. Returns `None` when the address is not registered.
+
+`StakerInfo` contains `stake_amount`, `rewards_earned`, `rewards_claimed`, and `registration_timestamp`. `rewards_earned` is cumulative claimed rewards plus the staker's current proportional share of the unclaimed rewards pool; the unclaimed portion is an estimate and can change as the pool or total stake changes. Legacy registrations without a stored timestamp return `0`.
+
+```rust
+if let Some(info) = vault.get_staker_info(&alice) {
+    // info.stake_amount, info.rewards_earned, info.rewards_claimed
+    // info.registration_timestamp
+}
+```
+
 #### `claim_staker_rewards(staker) -> Result<(), VaultError>`
 Claim accumulated rewards from the staker rewards pool.
 
