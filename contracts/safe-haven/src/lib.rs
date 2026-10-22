@@ -44,12 +44,14 @@ pub use contract::SafeHavenClient;
 
 // Prediction Market exports
 pub use prediction_market_types::{
-    PredictionMarket, MarketOutcome, Bet, MarketStatus, MarketConfig,
+    PredictionMarket, MarketOutcome, MarketWithOutcomes, Bet, MarketStatus, MarketConfig,
 };
 pub use prediction_market_errors::PredictionMarketError;
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
 #[cfg(test)]
 
 #[cfg(test)]
